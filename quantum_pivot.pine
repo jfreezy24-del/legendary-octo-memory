@@ -1,0 +1,259 @@
+//@version=6
+indicator("Quantum Pivot [Bitcoin Playboys]", "Quantum Pivot", overlay = true,
+     max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE QUANTUM PIVOT MODEL (Bitcoin Playboy)
+//
+//   01  Where to find a bias shift:
+//       High resulted in lower low  = Strong High
+//       High failed to make lower low = Weak High
+//       Low resulted in higher high = Strong Low
+//       Low failed to make higher high = Weak Low
+//       A bias shift (MSB) occurs when a STRONG level is broken — the pivot.
+//   02  Entry on the imbalance (FVG / OB) formed on the way to breaking the
+//       strong level, with stops below that imbalance.
+//   03  Enter on the INTERNAL imbalance, target the EXTERNAL strong levels
+//       of the previous trend.
+//   04  Every strong level taken out in the new trend leaves a fresh
+//       imbalance behind it — the next entry — producing multiple trades
+//       within the same trend.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Inputs ───────────────────────────────────────────────────────────────────
+grpS = "Structure"
+pivotLen  = input.int(5, "Pivot length", minval = 2, group = grpS,
+     tooltip = "Bars required on each side to confirm a swing high/low. Swings are classified Strong/Weak only after the next move resolves, as the model demands.")
+maxSwings = input.int(50, "Swing history kept", minval = 10, maxval = 200, group = grpS)
+
+grpE = "Entries"
+scanDepth = input.int(40, "Imbalance scan depth (bars)", minval = 5, maxval = 100, group = grpE,
+     tooltip = "After a strong level breaks, the script scans this many bars back for the most recent fair value gap formed on the way to the break.")
+useOB     = input.bool(true, "Fall back to order block if no FVG", group = grpE,
+     tooltip = "If the breaking impulse left no FVG, use the last opposite-direction candle before the break as the entry zone.")
+entryMode = input.string("Touch", "Pullback entry trigger", options = ["Touch", "Close inside"], group = grpE)
+maxZones  = input.int(10, "Max entry zones kept", minval = 2, maxval = 30, group = grpE)
+
+grpV = "Style"
+colBull   = input.color(#089981, "Bullish", group = grpV, inline = "c1")
+colBear   = input.color(#f23645, "Bearish", group = grpV, inline = "c1")
+colStrong = input.color(color.orange, "Strong levels", group = grpV, inline = "c2")
+colWeak   = input.color(color.gray, "Weak levels", group = grpV, inline = "c2")
+showSwingLabels = input.bool(true, "Label Strong / Weak swings", group = grpV)
+showLevelLines  = input.bool(true, "Draw level lines (solid = strong, dashed = weak)", group = grpV)
+showBiasBg      = input.bool(true, "Tint background with current bias", group = grpV)
+
+// ── Types & state ────────────────────────────────────────────────────────────
+type Swing
+    float price
+    int   bar
+    bool  isHigh
+    int   cls     // 0 pending • 1 strong • 2 weak
+    bool  broken
+    label lb
+    line  ln
+
+type EntryZone
+    box   bx
+    bool  isLong
+    float top
+    float bottom
+    int   born
+    bool  done
+
+type State
+    int  bias       // 1 bull • -1 bear • 0 none yet
+    bool qpBull
+    bool qpBear
+    bool contBull
+    bool contBear
+    bool longEntry
+    bool shortEntry
+
+var highsA = array.new<Swing>()
+var lowsA  = array.new<Swing>()
+var zonesA = array.new<EntryZone>()
+var State st = State.new(0, false, false, false, false, false, false)
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+// Classify a swing once the next move has resolved it (rule 01).
+classify(Swing s, bool strong) =>
+    s.cls := strong ? 1 : 2
+    color c = strong ? colStrong : colWeak
+    if showSwingLabels
+        s.lb := label.new(s.bar, s.price,
+             (strong ? "Strong " : "Weak ") + (s.isHigh ? "High" : "Low"),
+             style = s.isHigh ? label.style_label_down : label.style_label_up,
+             color = color.new(c, 100), textcolor = color.new(c, 20), size = size.tiny)
+        label.set_tooltip(s.lb, strong ? "Strong level: look to enter when broken" : "Weak level: look to target")
+    if showLevelLines
+        s.ln := line.new(s.bar, s.price, bar_index, s.price,
+             color = color.new(c, 30), width = 1,
+             style = strong ? line.style_solid : line.style_dashed)
+        line.set_x2(s.ln, bar_index)
+
+dropSwing(array<Swing> arr) =>
+    if array.size(arr) > maxSwings
+        Swing old = array.shift(arr)
+        if not na(old.lb)
+            label.delete(old.lb)
+        if not na(old.ln)
+            line.delete(old.ln)
+
+// A new confirmed high resolves the low that formed before it (and mirror).
+onNewSwing(bool isHigh, float price, int bar) =>
+    arr      = isHigh ? highsA : lowsA
+    opposite = isHigh ? lowsA : highsA
+    if array.size(arr) > 0 and array.size(opposite) > 0
+        Swing prevSame = array.get(arr, array.size(arr) - 1)
+        Swing lastOpp  = array.get(opposite, array.size(opposite) - 1)
+        if lastOpp.cls == 0 and lastOpp.bar > prevSame.bar
+            // higher high makes the low strong; lower low makes the high strong
+            bool strong = isHigh ? price > prevSame.price : price < prevSame.price
+            classify(lastOpp, strong)
+    array.push(arr, Swing.new(price, bar, isHigh, 0, false, label(na), line(na)))
+    dropSwing(arr)
+
+// Rule 02: find the imbalance left behind by the impulse that broke the level.
+spawnZone(bool isLong) =>
+    int  found = -1
+    bool isFVG = false
+    int  maxK  = math.min(scanDepth, bar_index - 2)
+    if maxK >= 0
+        for k = 0 to maxK
+            bool gap = isLong ? low[k] > high[k + 2] and low[k] <= close
+                 : high[k] < low[k + 2] and high[k] >= close
+            if gap
+                found := k
+                isFVG := true
+                break
+    if found < 0 and useOB and bar_index >= 1
+        int maxKo = math.min(scanDepth, bar_index)
+        for k = 1 to maxKo
+            bool ob = isLong ? close[k] < open[k] and high[k] < close
+                 : close[k] > open[k] and low[k] > close
+            if ob
+                found := k
+                break
+    if found >= 0
+        float zTop = isFVG ? (isLong ? low[found] : low[found + 2]) : high[found]
+        float zBot = isFVG ? (isLong ? high[found + 2] : high[found]) : low[found]
+        color c   = isLong ? colBull : colBear
+        b = box.new(bar_index - found - (isFVG ? 1 : 0), zTop, bar_index, zBot,
+             border_color = color.new(c, 50), border_width = 1, bgcolor = color.new(c, 85),
+             text = (isFVG ? "FVG" : "OB") + (isLong ? " entry ▲" : " entry ▼"),
+             text_size = size.tiny, text_color = color.new(c, 20), text_halign = text.align_right)
+        array.push(zonesA, EntryZone.new(b, isLong, zTop, zBot, bar_index, false))
+        if array.size(zonesA) > maxZones
+            EntryZone old = array.shift(zonesA)
+            box.delete(old.bx)
+
+// ── Per-bar logic ────────────────────────────────────────────────────────────
+st.qpBull     := false
+st.qpBear     := false
+st.contBull   := false
+st.contBear   := false
+st.longEntry  := false
+st.shortEntry := false
+
+// 1. Confirm new swings and resolve Strong/Weak (rule 01)
+if not na(ta.pivothigh(pivotLen, pivotLen))
+    onNewSwing(true, high[pivotLen], bar_index - pivotLen)
+if not na(ta.pivotlow(pivotLen, pivotLen))
+    onNewSwing(false, low[pivotLen], bar_index - pivotLen)
+
+// 2. Level breaks: quantum pivots, continuation raids, late classification
+for s in highsA
+    if not s.broken and not na(s.ln)
+        line.set_x2(s.ln, bar_index)
+    if not s.broken and close > s.price
+        s.broken := true
+        // breaking a high means the low after it produced a higher high → strong
+        if array.size(lowsA) > 0
+            Swing lastL = array.get(lowsA, array.size(lowsA) - 1)
+            if lastL.cls == 0 and lastL.bar > s.bar
+                classify(lastL, true)
+        if st.bias != 1 and s.cls == 1
+            st.bias   := 1
+            st.qpBull := true
+            spawnZone(true)
+        else if st.bias == 1
+            st.contBull := true
+            spawnZone(true)
+
+for s in lowsA
+    if not s.broken and not na(s.ln)
+        line.set_x2(s.ln, bar_index)
+    if not s.broken and close < s.price
+        s.broken := true
+        if array.size(highsA) > 0
+            Swing lastH = array.get(highsA, array.size(highsA) - 1)
+            if lastH.cls == 0 and lastH.bar > s.bar
+                classify(lastH, true)
+        if st.bias != -1 and s.cls == 1
+            st.bias   := -1
+            st.qpBear := true
+            spawnZone(false)
+        else if st.bias == -1
+            st.contBear := true
+            spawnZone(false)
+
+// 3. Pullback entries into the spawned imbalances (rules 02 & 04)
+for z in zonesA
+    if not z.done
+        box.set_right(z.bx, bar_index)
+        if z.isLong
+            if close < z.bottom
+                z.done := true
+                box.set_bgcolor(z.bx, color.new(color.gray, 92))
+                box.set_text(z.bx, "invalidated")
+            else if bar_index > z.born and (entryMode == "Touch" ? low <= z.top : close <= z.top and close >= z.bottom)
+                z.done := true
+                st.longEntry := true
+                box.set_text(z.bx, "LONG ✓")
+        else
+            if close > z.top
+                z.done := true
+                box.set_bgcolor(z.bx, color.new(color.gray, 92))
+                box.set_text(z.bx, "invalidated")
+            else if bar_index > z.born and (entryMode == "Touch" ? high >= z.bottom : close >= z.bottom and close <= z.top)
+                z.done := true
+                st.shortEntry := true
+                box.set_text(z.bx, "SHORT ✓")
+
+// ── Visuals, signals & alerts ────────────────────────────────────────────────
+bgcolor(showBiasBg ? (st.bias == 1 ? color.new(colBull, 94) : st.bias == -1 ? color.new(colBear, 94) : na) : na,
+     title = "Bias")
+
+bool sigQPBull   = st.qpBull
+bool sigQPBear   = st.qpBear
+bool sigContBull = st.contBull
+bool sigContBear = st.contBear
+bool sigLong     = st.longEntry
+bool sigShort    = st.shortEntry
+
+plotshape(sigQPBull, "Quantum Pivot up", shape.diamond, location.belowbar,
+     color.new(#089981, 0), size = size.small, text = "QP", textcolor = #089981)
+plotshape(sigQPBear, "Quantum Pivot down", shape.diamond, location.abovebar,
+     color.new(#f23645, 0), size = size.small, text = "QP", textcolor = #f23645)
+plotshape(sigContBull, "Continuation raid up", shape.circle, location.belowbar,
+     color.new(#089981, 40), size = size.tiny)
+plotshape(sigContBear, "Continuation raid down", shape.circle, location.abovebar,
+     color.new(#f23645, 40), size = size.tiny)
+plotshape(sigLong, "Long entry (pullback into imbalance)", shape.triangleup, location.belowbar,
+     color.new(#089981, 0), size = size.small, text = "LONG", textcolor = #089981)
+plotshape(sigShort, "Short entry (pullback into imbalance)", shape.triangledown, location.abovebar,
+     color.new(#f23645, 0), size = size.small, text = "SHORT", textcolor = #f23645)
+
+alertcondition(sigQPBull,   "Quantum Pivot — bullish",
+     "Quantum Pivot: strong high broken, bias shifted bullish on {{ticker}} {{interval}}")
+alertcondition(sigQPBear,   "Quantum Pivot — bearish",
+     "Quantum Pivot: strong low broken, bias shifted bearish on {{ticker}} {{interval}}")
+alertcondition(sigContBull, "Continuation raid — bullish",
+     "Quantum Pivot: next level taken out in bull trend, fresh entry imbalance marked on {{ticker}} {{interval}}")
+alertcondition(sigContBear, "Continuation raid — bearish",
+     "Quantum Pivot: next level taken out in bear trend, fresh entry imbalance marked on {{ticker}} {{interval}}")
+alertcondition(sigLong,     "Long entry — pullback into imbalance",
+     "Quantum Pivot: LONG entry, price pulled back into the post-break imbalance on {{ticker}} {{interval}}")
+alertcondition(sigShort,    "Short entry — pullback into imbalance",
+     "Quantum Pivot: SHORT entry, price pulled back into the post-break imbalance on {{ticker}} {{interval}}")
