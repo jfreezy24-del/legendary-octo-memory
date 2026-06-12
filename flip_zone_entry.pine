@@ -91,14 +91,14 @@ spend(Zone z) =>
 
 flip(Zone z) =>
     z.state := 3
-    box.set_bgcolor(z.bx, colFlip)
-    box.set_border_color(z.bx, color.new(colFlip, 40))
-    box.set_text_color(z.bx, color.new(colFlip, 0))
-    box.set_text(z.bx, z.isSupply ? "FLIP ▲ now demand" : "FLIP ▼ now supply")
     if z.isSupply
         m.bullFlip := true
     else
         m.bearFlip := true
+    box.set_bgcolor(z.bx, colFlip)
+    box.set_border_color(z.bx, color.new(colFlip, 40))
+    box.set_text_color(z.bx, color.new(colFlip, 0))
+    box.set_text(z.bx, z.isSupply ? "FLIP ▲ now demand" : "FLIP ▼ now supply")
 
 consume(Zone z) =>
     z.state := 4
@@ -152,20 +152,20 @@ processSupply(Zone z) =>
             z.state := 2  // step 2: the reaction away from the opposing zone
             box.set_text(z.bx, "supply • reacting")
     else if z.state == 2
+        // The break is measured against the swing the reaction made so far.
         float mssLevel = requireMSS ? math.max(z.top, z.reactExt) : z.top
+        z.reactExt := math.max(z.reactExt, high)
         if close > mssLevel
             // The reaction failed and structure shifted up: step 3.
             if z.poiOK
                 flip(z)
             else
                 spend(z)
-        else
-            z.reactExt := math.max(z.reactExt, high)
     else if z.state == 3
         // Bullish flip zone: broken supply now expected to act as demand.
         if close < z.bottom
             spend(z)  // flip failed
-        else if entryMode == "Touch" ? low <= z.top : close <= z.top and close >= z.bottom
+        else if (entryMode == "Touch" ? low <= z.top : close <= z.top and close >= z.bottom)
             m.bullEntry := true
             consume(z)
 
@@ -191,18 +191,17 @@ processDemand(Zone z) =>
             box.set_text(z.bx, "demand • reacting")
     else if z.state == 2
         float mssLevel = requireMSS ? math.min(z.bottom, z.reactExt) : z.bottom
+        z.reactExt := math.min(z.reactExt, low)
         if close < mssLevel
             if z.poiOK
                 flip(z)
             else
                 spend(z)
-        else
-            z.reactExt := math.min(z.reactExt, low)
     else if z.state == 3
         // Bearish flip zone: broken demand now expected to act as supply.
         if close > z.top
             spend(z)
-        else if entryMode == "Touch" ? high >= z.bottom : close >= z.bottom and close <= z.top
+        else if (entryMode == "Touch" ? high >= z.bottom : close >= z.bottom and close <= z.top)
             m.bearEntry := true
             consume(z)
 
@@ -232,20 +231,25 @@ purge(supplyZones)
 purge(demandZones)
 
 // ── Signals & alerts ─────────────────────────────────────────────────────────
-plotshape(m.bullFlip, "Bullish flip confirmed", shape.diamond, location.belowbar,
+bool sigBullFlip  = m.bullFlip
+bool sigBearFlip  = m.bearFlip
+bool sigBullEntry = m.bullEntry
+bool sigBearEntry = m.bearEntry
+
+plotshape(sigBullFlip, "Bullish flip confirmed", shape.diamond, location.belowbar,
      color.new(color.orange, 0), size = size.tiny)
-plotshape(m.bearFlip, "Bearish flip confirmed", shape.diamond, location.abovebar,
+plotshape(sigBearFlip, "Bearish flip confirmed", shape.diamond, location.abovebar,
      color.new(color.orange, 0), size = size.tiny)
-plotshape(m.bullEntry, "Long entry (pullback into flip)", shape.triangleup, location.belowbar,
+plotshape(sigBullEntry, "Long entry (pullback into flip)", shape.triangleup, location.belowbar,
      color.new(#089981, 0), size = size.small, text = "LONG", textcolor = #089981)
-plotshape(m.bearEntry, "Short entry (pullback into flip)", shape.triangledown, location.abovebar,
+plotshape(sigBearEntry, "Short entry (pullback into flip)", shape.triangledown, location.abovebar,
      color.new(#f23645, 0), size = size.small, text = "SHORT", textcolor = #f23645)
 
-alertcondition(m.bullFlip,  "Bullish flip zone confirmed",
+alertcondition(sigBullFlip,  "Bullish flip zone confirmed",
      "Flip Zone: bullish flip zone confirmed (failed reaction at supply) on {{ticker}} {{interval}}")
-alertcondition(m.bearFlip,  "Bearish flip zone confirmed",
+alertcondition(sigBearFlip,  "Bearish flip zone confirmed",
      "Flip Zone: bearish flip zone confirmed (failed reaction at demand) on {{ticker}} {{interval}}")
-alertcondition(m.bullEntry, "Long entry — pullback into bullish flip zone",
+alertcondition(sigBullEntry, "Long entry — pullback into bullish flip zone",
      "Flip Zone: LONG entry, price pulled back into the bullish flip zone on {{ticker}} {{interval}}")
-alertcondition(m.bearEntry, "Short entry — pullback into bearish flip zone",
+alertcondition(sigBearEntry, "Short entry — pullback into bearish flip zone",
      "Flip Zone: SHORT entry, price pulled back into the bearish flip zone on {{ticker}} {{interval}}")
