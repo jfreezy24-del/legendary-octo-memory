@@ -1,0 +1,174 @@
+//@version=5
+// =============================================================================
+// OHLC Stat Map
+// -----------------------------------------------------------------------------
+// Statistical manipulation/distribution map based on the Power of Three (Po3)
+// model: Accumulation -> Manipulation -> Distribution.
+//
+// Idea (from the Stat Map concept):
+//   For a chosen anchor timeframe (Weekly / Daily / 4H ...), every completed
+//   candle is measured relative to its OPEN:
+//     - Bullish candle (close >= open):
+//         manipulation = open - low      (fake move below open)
+//         distribution = high - open     (true expansion above open)
+//     - Bearish candle (close < open):
+//         manipulation = high - open     (fake move above open)
+//         distribution = open - low      (true expansion below open)
+//
+//   The indicator averages those manipulation and distribution distances over a
+//   lookback window. When a new anchor candle opens, it projects the average
+//   distances above and below the opening price, giving statistical zones that
+//   often act as reversal levels:
+//
+//         + Distribution   (open + avgDistribution)   <- top of upper range
+//         - Manipulation   (open + avgManipulation)
+//         ----------------  OPEN  ----------------
+//         + Manipulation   (open - avgManipulation)
+//         - Distribution   (open - avgDistribution)   <- bottom of lower range
+//
+//   * Manipulation range : between - Manipulation and + Manipulation (the main
+//     range price starts trading in).
+//   * + Distribution range: between - Manipulation and + Distribution (upper).
+//   * - Distribution range: between + Manipulation and - Distribution (lower).
+// =============================================================================
+
+indicator("OHLC Stat Map", shorttitle="Stat Map", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// ----------------------------------------------------------------------------- Inputs
+grpCalc = "Calculation"
+anchorTf   = input.timeframe("D",  "Anchor timeframe",        group=grpCalc, tooltip="HTF candle whose open the statistical map is anchored to. Daily candle is treated as starting at 18:00 (6PM) EST on the chart's exchange feed if your data provider uses that session.")
+lookback   = input.int(20, "Lookback (candles)", minval=1, maxval=500, group=grpCalc, tooltip="Number of completed anchor candles used to average manipulation and distribution distances.")
+separateBias = input.bool(false, "Separate bull/bear averages", group=grpCalc, tooltip="When on, manipulation/distribution distances are averaged separately for bullish and bearish anchor candles, and the projection uses the average of the two sets.")
+
+grpStyle = "Style"
+showRange  = input.bool(true,  "Shade ranges",            group=grpStyle)
+showLabels = input.bool(true,  "Show labels",             group=grpStyle)
+extendRight = input.bool(true, "Extend levels right",     group=grpStyle)
+manipColor = input.color(color.new(color.orange, 0), "Manipulation lines", group=grpStyle, inline="m")
+manipFill  = input.color(color.new(color.orange, 85), "fill",              group=grpStyle, inline="m")
+distColor  = input.color(color.new(color.teal, 0),   "Distribution lines", group=grpStyle, inline="d")
+distFill   = input.color(color.new(color.teal, 85),  "fill",               group=grpStyle, inline="d")
+openColor  = input.color(color.new(color.gray, 0),   "Open line",          group=grpStyle)
+lineWidth  = input.int(1, "Line width", minval=1, maxval=4, group=grpStyle)
+
+// ----------------------------------------------------------------------------- HTF data
+[htfOpen, htfHigh, htfLow, htfClose] = request.security(syminfo.tickerid, anchorTf, [open, high, low, close], lookahead=barmerge.lookahead_off)
+
+// New anchor candle detection (true on the first chart bar of each anchor candle).
+isNewCandle = timeframe.change(anchorTf)
+
+// ----------------------------------------------------------------------------- Rolling stats
+// Store one manipulation/distribution sample per *completed* anchor candle.
+var array<float> manipBull = array.new_float()
+var array<float> distBull  = array.new_float()
+var array<float> manipBear = array.new_float()
+var array<float> distBear  = array.new_float()
+
+avgOf(array<float> a) =>
+    array.size(a) > 0 ? array.avg(a) : na
+
+pushCapped(array<float> a, float v) =>
+    if not na(v)
+        array.push(a, v)
+        if array.size(a) > lookback
+            array.shift(a)
+
+// When a new anchor candle starts, the *previous* anchor candle has just closed,
+// so its OHLC (htfOpen[1]... in HTF terms) is final and can be sampled.
+if isNewCandle and not na(htfOpen[1])
+    pO = htfOpen[1]
+    pH = htfHigh[1]
+    pL = htfLow[1]
+    pC = htfClose[1]
+    bullish = pC >= pO
+    manip = bullish ? pO - pL : pH - pO
+    dist  = bullish ? pH - pO : pO - pL
+    if separateBias
+        if bullish
+            pushCapped(manipBull, manip)
+            pushCapped(distBull, dist)
+        else
+            pushCapped(manipBear, manip)
+            pushCapped(distBear, dist)
+    else
+        pushCapped(manipBull, manip)
+        pushCapped(distBull, dist)
+
+// Average manipulation / distribution distances.
+avgManip = separateBias ? math.avg(nz(avgOf(manipBull), avgOf(manipBear)), nz(avgOf(manipBear), avgOf(manipBull))) : avgOf(manipBull)
+avgDist  = separateBias ? math.avg(nz(avgOf(distBull),  avgOf(distBear)),  nz(avgOf(distBear),  avgOf(distBull)))  : avgOf(distBull)
+
+// ----------------------------------------------------------------------------- Level values
+anchorOpen = htfOpen
+plusDist  = anchorOpen + avgDist    // + Distribution (top)
+minusManip = anchorOpen + avgManip  // - Manipulation
+plusManip = anchorOpen - avgManip   // + Manipulation
+minusDist = anchorOpen - avgDist    // - Distribution (bottom)
+
+// ----------------------------------------------------------------------------- Drawing
+var line   lOpen   = na
+var line   lPDist  = na
+var line   lMManip = na
+var line   lPManip = na
+var line   lMDist  = na
+var label  bOpen   = na
+var label  bPDist  = na
+var label  bMManip = na
+var label  bPManip = na
+var label  bMDist  = na
+var box    boxManip = na
+var box    boxUpper = na
+var box    boxLower = na
+var int    anchorStartBar = na
+
+mkLine(float y, color c) =>
+    line.new(bar_index, y, bar_index, y, color=c, width=lineWidth, extend=extend.none)
+
+mkLabel(float y, string txt, color c) =>
+    label.new(bar_index, y, txt, style=label.style_label_left, textcolor=c, color=color.new(color.black, 100), size=size.small)
+
+if isNewCandle and not na(avgManip) and not na(avgDist)
+    anchorStartBar := bar_index
+    lOpen   := mkLine(anchorOpen, openColor)
+    lPDist  := mkLine(plusDist,  distColor)
+    lMManip := mkLine(minusManip, manipColor)
+    lPManip := mkLine(plusManip, manipColor)
+    lMDist  := mkLine(minusDist, distColor)
+    if showLabels
+        bOpen   := mkLabel(anchorOpen, "Open", openColor)
+        bPDist  := mkLabel(plusDist,  "+ Distribution", distColor)
+        bMManip := mkLabel(minusManip, "- Manipulation", manipColor)
+        bPManip := mkLabel(plusManip, "+ Manipulation", manipColor)
+        bMDist  := mkLabel(minusDist, "- Distribution", distColor)
+    if showRange
+        boxManip := box.new(bar_index, minusManip, bar_index, plusManip, border_color=color.new(manipColor, 60), bgcolor=manipFill)
+        boxUpper := box.new(bar_index, plusDist,  bar_index, minusManip, border_color=color.new(distColor, 70), bgcolor=distFill)
+        boxLower := box.new(bar_index, plusManip, bar_index, minusDist,  border_color=color.new(distColor, 70), bgcolor=distFill)
+
+// Extend the current anchor candle's drawings to the right edge as it develops.
+if not na(lOpen)
+    rightX = extendRight ? bar_index + 2 : bar_index
+    line.set_x2(lOpen, rightX)
+    line.set_x2(lPDist, rightX)
+    line.set_x2(lMManip, rightX)
+    line.set_x2(lPManip, rightX)
+    line.set_x2(lMDist, rightX)
+    line.set_y1(lOpen, anchorOpen),  line.set_y2(lOpen, anchorOpen)
+    line.set_y1(lPDist, plusDist),   line.set_y2(lPDist, plusDist)
+    line.set_y1(lMManip, minusManip),line.set_y2(lMManip, minusManip)
+    line.set_y1(lPManip, plusManip), line.set_y2(lPManip, plusManip)
+    line.set_y1(lMDist, minusDist),  line.set_y2(lMDist, minusDist)
+    if showLabels and not na(bOpen)
+        label.set_xy(bOpen, rightX, anchorOpen)
+        label.set_xy(bPDist, rightX, plusDist)
+        label.set_xy(bMManip, rightX, minusManip)
+        label.set_xy(bPManip, rightX, plusManip)
+        label.set_xy(bMDist, rightX, minusDist)
+    if showRange and not na(boxManip)
+        box.set_right(boxManip, rightX), box.set_top(boxManip, minusManip), box.set_bottom(boxManip, plusManip)
+        box.set_right(boxUpper, rightX), box.set_top(boxUpper, plusDist),   box.set_bottom(boxUpper, minusManip)
+        box.set_right(boxLower, rightX), box.set_top(boxLower, plusManip),  box.set_bottom(boxLower, minusDist)
+
+// ----------------------------------------------------------------------------- Alerts
+alertcondition(ta.crossover(close, minusManip)  or ta.crossunder(close, plusManip),  "Tagged Manipulation level", "Price tagged a Stat Map manipulation level")
+alertcondition(ta.crossover(close, plusDist)    or ta.crossunder(close, minusDist),  "Tagged Distribution level", "Price tagged a Stat Map distribution level")
