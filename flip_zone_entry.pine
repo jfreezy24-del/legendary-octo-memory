@@ -1,0 +1,251 @@
+//@version=6
+indicator("Flip Zone Entry Model", "Flip Zone", overlay = true,
+     max_boxes_count = 500, max_labels_count = 100)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE FLIP ZONE ENTRY MODEL
+//
+//   Step 1: Wait for price to mitigate your point of interest (POI).
+//   Step 2: Look for a failed reaction at the opposing zone.
+//   Step 3: That failed reaction becomes your flip zone.
+//   Entry : Pullback into the flip zone after the market shift confirms.
+//
+// Mapping (bullish case — the bearish case is the exact mirror):
+//   POI             = demand zone built from a confirmed swing low
+//   Mitigation      = price trades back into that demand zone
+//   Opposing zone   = supply zone overhead
+//   Reaction        = price taps the supply and pulls away from it
+//   Failed reaction = price returns and closes through the supply
+//   Market shift    = the close is also beyond the swing the reaction created
+//   Flip zone       = that broken supply, now expected to act as demand
+//   Entry           = the first pullback into the flip zone
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Inputs ───────────────────────────────────────────────────────────────────
+grpZ = "Zone detection"
+pivotLen  = input.int(10, "Pivot length", minval = 2, group = grpZ,
+     tooltip = "Swing highs create supply zones, swing lows create demand zones. A pivot needs this many bars on each side, so zones appear with that delay.")
+zoneWidth = input.string("Wick", "Zone width", options = ["Wick", "Full bar"], group = grpZ,
+     tooltip = "Wick = from the extreme of the pivot candle to its body. Full bar = the candle's entire high-to-low range.")
+maxZones  = input.int(8, "Max active zones per side", minval = 1, maxval = 30, group = grpZ)
+poiTTL    = input.int(150, "POI validity (bars)", minval = 10, group = grpZ,
+     tooltip = "Step 1: a mitigated POI arms the model for this many bars. Flips that happen later, without a fresh mitigation, are ignored.")
+
+grpM = "Flip model"
+requireReaction = input.bool(true, "Require a reaction before the flip", group = grpM,
+     tooltip = "Step 2: price must first react away from the opposing zone before breaking it. If off, any clean break of the opposing zone creates a flip zone.")
+minReactPct     = input.float(25, "Min. reaction size (% of zone height)", minval = 0, step = 5, group = grpM,
+     tooltip = "How far price must pull away from the opposing zone for the move to count as a reaction.")
+requireMSS      = input.bool(true, "Require market structure shift", group = grpM,
+     tooltip = "The flip only confirms once price closes beyond the swing created by the failed reaction — not merely beyond the zone.")
+entryMode       = input.string("Touch", "Pullback entry trigger", options = ["Touch", "Close inside"], group = grpM,
+     tooltip = "Touch = signal as soon as price tags the flip zone. Close inside = wait for a bar to close inside the flip zone.")
+
+grpS = "Style"
+colSupply = input.color(color.new(color.red, 85),    "Supply",    group = grpS, inline = "c1")
+colDemand = input.color(color.new(color.teal, 85),   "Demand",    group = grpS, inline = "c1")
+colFlip   = input.color(color.new(color.orange, 75), "Flip zone", group = grpS, inline = "c2")
+colSpent  = input.color(color.new(color.gray, 92),   "Spent",     group = grpS, inline = "c2")
+showSpent = input.bool(false, "Keep broken / spent zones on the chart", group = grpS)
+
+// ── Types & state ────────────────────────────────────────────────────────────
+// Zone life cycle (state):
+//   0 fresh      waiting for its first touch
+//   1 mitigated  price has traded into the zone
+//   2 reacting   price pulled away from the zone (step 2 reaction in progress)
+//   3 flip zone  the reaction failed: price closed through zone + reaction swing
+//   4 spent      entry taken, zone broken, or setup invalidated
+type Zone
+    box   bx
+    bool  isSupply
+    float top
+    float bottom
+    int   state
+    float reactExt  // extreme of the swing created by the reaction
+    bool  poiOK     // an opposing POI was mitigated before this zone was touched
+
+type Model
+    int  bullPOIbar  // bar of the most recent demand (bull POI) mitigation
+    int  bearPOIbar  // bar of the most recent supply (bear POI) mitigation
+    bool bullFlip
+    bool bearFlip
+    bool bullEntry
+    bool bearEntry
+
+var supplyZones = array.new<Zone>()
+var demandZones = array.new<Zone>()
+var Model m = Model.new(na, na, false, false, false, false)
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+armed(int poiBar) =>
+    not na(poiBar) and bar_index - poiBar <= poiTTL
+
+spend(Zone z) =>
+    z.state := 4
+    if showSpent
+        box.set_bgcolor(z.bx, colSpent)
+        box.set_border_color(z.bx, color.new(colSpent, 60))
+        box.set_text_color(z.bx, color.new(color.gray, 40))
+    else
+        box.delete(z.bx)
+
+flip(Zone z) =>
+    z.state := 3
+    box.set_bgcolor(z.bx, colFlip)
+    box.set_border_color(z.bx, color.new(colFlip, 40))
+    box.set_text_color(z.bx, color.new(colFlip, 0))
+    box.set_text(z.bx, z.isSupply ? "FLIP ▲ now demand" : "FLIP ▼ now supply")
+    if z.isSupply
+        m.bullFlip := true
+    else
+        m.bearFlip := true
+
+consume(Zone z) =>
+    z.state := 4
+    box.set_text(z.bx, "entry ✓")
+
+overlapsActive(array<Zone> arr, float zTop, float zBot) =>
+    hit = false
+    for z in arr
+        if z.state < 4 and zBot <= z.top and zTop >= z.bottom
+            hit := true
+    hit
+
+newZone(bool isSupply, int off) =>
+    float zTop = isSupply ? high[off] : zoneWidth == "Wick" ? math.min(open[off], close[off]) : high[off]
+    float zBot = isSupply ? (zoneWidth == "Wick" ? math.max(open[off], close[off]) : low[off]) : low[off]
+    arr = isSupply ? supplyZones : demandZones
+    if zTop > zBot and not overlapsActive(arr, zTop, zBot)
+        cFill = isSupply ? colSupply : colDemand
+        b = box.new(bar_index - off, zTop, bar_index, zBot,
+             border_color = color.new(cFill, 60), border_width = 1, bgcolor = cFill,
+             text = isSupply ? "supply" : "demand", text_size = size.tiny,
+             text_color = color.new(cFill, 20), text_halign = text.align_right)
+        array.push(arr, Zone.new(b, isSupply, zTop, zBot, 0, na, false))
+        if array.size(arr) > maxZones
+            old = array.shift(arr)
+            box.delete(old.bx)
+
+// ── Zone state machines ──────────────────────────────────────────────────────
+// A supply zone doubles as the bear-side POI (its first touch is its
+// mitigation) and as the bull-side opposing zone (a failed reaction here
+// flips it into demand). Demand zones are the mirror image.
+processSupply(Zone z) =>
+    if z.state < 4
+        box.set_right(z.bx, bar_index)
+    if z.state == 0
+        if high >= z.bottom
+            z.state    := 1
+            z.reactExt := high
+            z.poiOK    := armed(m.bullPOIbar)  // step 1 happened first?
+            m.bearPOIbar := bar_index          // this supply is now a mitigated bear POI
+            box.set_text(z.bx, "supply • mitigated")
+    else if z.state == 1
+        z.reactExt := math.max(z.reactExt, high)
+        if close > z.top
+            // Broke through without a confirmed reaction first.
+            if not requireReaction and z.poiOK
+                flip(z)
+            else
+                spend(z)
+        else if low <= z.bottom - (z.top - z.bottom) * minReactPct / 100
+            z.state := 2  // step 2: the reaction away from the opposing zone
+            box.set_text(z.bx, "supply • reacting")
+    else if z.state == 2
+        float mssLevel = requireMSS ? math.max(z.top, z.reactExt) : z.top
+        if close > mssLevel
+            // The reaction failed and structure shifted up: step 3.
+            if z.poiOK
+                flip(z)
+            else
+                spend(z)
+        else
+            z.reactExt := math.max(z.reactExt, high)
+    else if z.state == 3
+        // Bullish flip zone: broken supply now expected to act as demand.
+        if close < z.bottom
+            spend(z)  // flip failed
+        else if entryMode == "Touch" ? low <= z.top : close <= z.top and close >= z.bottom
+            m.bullEntry := true
+            consume(z)
+
+processDemand(Zone z) =>
+    if z.state < 4
+        box.set_right(z.bx, bar_index)
+    if z.state == 0
+        if low <= z.top
+            z.state    := 1
+            z.reactExt := low
+            z.poiOK    := armed(m.bearPOIbar)
+            m.bullPOIbar := bar_index          // this demand is now a mitigated bull POI
+            box.set_text(z.bx, "demand • mitigated")
+    else if z.state == 1
+        z.reactExt := math.min(z.reactExt, low)
+        if close < z.bottom
+            if not requireReaction and z.poiOK
+                flip(z)
+            else
+                spend(z)
+        else if high >= z.top + (z.top - z.bottom) * minReactPct / 100
+            z.state := 2
+            box.set_text(z.bx, "demand • reacting")
+    else if z.state == 2
+        float mssLevel = requireMSS ? math.min(z.bottom, z.reactExt) : z.bottom
+        if close < mssLevel
+            if z.poiOK
+                flip(z)
+            else
+                spend(z)
+        else
+            z.reactExt := math.min(z.reactExt, low)
+    else if z.state == 3
+        // Bearish flip zone: broken demand now expected to act as supply.
+        if close > z.top
+            spend(z)
+        else if entryMode == "Touch" ? high >= z.bottom : close >= z.bottom and close <= z.top
+            m.bearEntry := true
+            consume(z)
+
+purge(array<Zone> arr) =>
+    if array.size(arr) > 0
+        for i = array.size(arr) - 1 to 0
+            if array.get(arr, i).state == 4
+                array.remove(arr, i)
+
+// ── Per-bar logic ────────────────────────────────────────────────────────────
+m.bullFlip  := false
+m.bearFlip  := false
+m.bullEntry := false
+m.bearEntry := false
+
+if not na(ta.pivothigh(pivotLen, pivotLen))
+    newZone(true, pivotLen)
+if not na(ta.pivotlow(pivotLen, pivotLen))
+    newZone(false, pivotLen)
+
+for z in supplyZones
+    processSupply(z)
+for z in demandZones
+    processDemand(z)
+
+purge(supplyZones)
+purge(demandZones)
+
+// ── Signals & alerts ─────────────────────────────────────────────────────────
+plotshape(m.bullFlip, "Bullish flip confirmed", shape.diamond, location.belowbar,
+     color.new(color.orange, 0), size = size.tiny)
+plotshape(m.bearFlip, "Bearish flip confirmed", shape.diamond, location.abovebar,
+     color.new(color.orange, 0), size = size.tiny)
+plotshape(m.bullEntry, "Long entry (pullback into flip)", shape.triangleup, location.belowbar,
+     color.new(#089981, 0), size = size.small, text = "LONG", textcolor = #089981)
+plotshape(m.bearEntry, "Short entry (pullback into flip)", shape.triangledown, location.abovebar,
+     color.new(#f23645, 0), size = size.small, text = "SHORT", textcolor = #f23645)
+
+alertcondition(m.bullFlip,  "Bullish flip zone confirmed",
+     "Flip Zone: bullish flip zone confirmed (failed reaction at supply) on {{ticker}} {{interval}}")
+alertcondition(m.bearFlip,  "Bearish flip zone confirmed",
+     "Flip Zone: bearish flip zone confirmed (failed reaction at demand) on {{ticker}} {{interval}}")
+alertcondition(m.bullEntry, "Long entry — pullback into bullish flip zone",
+     "Flip Zone: LONG entry, price pulled back into the bullish flip zone on {{ticker}} {{interval}}")
+alertcondition(m.bearEntry, "Short entry — pullback into bearish flip zone",
+     "Flip Zone: SHORT entry, price pulled back into the bearish flip zone on {{ticker}} {{interval}}")
