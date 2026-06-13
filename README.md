@@ -44,10 +44,10 @@ independently). The state resets when a new period prints a fresh level.
 
 ### Standard-deviation targets (fractal projection)
 
-On a valid setup the indicator projects standard-deviation multiples of the **C1→C2
-manipulation leg** (the swing that swept liquidity): `1` = C2 (the manipulation extreme),
-`0` = C1 (origin), and negatives (`-1`, `-2`, `-2.5`, …) are the **draw-on-liquidity
-targets**. Levels are drawn as a tick ladder at the right edge with `C2` / `BB` labels, and
+On a valid setup the indicator projects standard-deviation multiples anchored to the
+**Unicorn zone**: `0` = the zone edge (entry / `BB`), `1` = C2 (the manipulation extreme
+that swept liquidity), and negatives (`-1`, `-2`, `-2.5`, …) are the **draw-on-liquidity
+targets**. The unit = C2 − zone, so the whole ladder scales with the zone. Levels are drawn as a tick ladder at the right edge with `C2` / `BB` labels, and
 an optional shaded **target zone** between two chosen multiples. Edit the set under
 **Standard Deviation Targets → Levels** (comma-separated, e.g. `1, 0, -1, -2, -2.5`).
 

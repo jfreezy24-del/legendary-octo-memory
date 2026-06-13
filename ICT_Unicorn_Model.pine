@@ -150,18 +150,15 @@ if buyRaid
 sweptSell = not na(sellRaidBar) and (bar_index - sellRaidBar) <= raidMemBars
 sweptBuy  = not na(buyRaidBar)  and (bar_index - buyRaidBar)  <= raidMemBars
 
-// ---- C1->C2 manipulation leg (anchors for the std-dev projection) ----
-// Bearish leg opens on a buy-side raid: C1 = origin low, C2 = manipulation high.
-// Bullish leg opens on a sell-side raid: C1 = origin high, C2 = manipulation low.
-var float bearC1 = na
+// ---- C2 manipulation extreme (level-1 anchor; 0 = the Unicorn zone) ----
+// Bearish leg opens on a buy-side raid: C2 = manipulation high.
+// Bullish leg opens on a sell-side raid: C2 = manipulation low.
 var float bearC2 = na
 var int   bearC2Bar = na
-var float bullC1 = na
 var float bullC2 = na
 var int   bullC2Bar = na
 
 if buyRaid
-    bearC1 := swingLow
     bearC2 := high
     bearC2Bar := bar_index
 else if sweptBuy and high > bearC2
@@ -169,7 +166,6 @@ else if sweptBuy and high > bearC2
     bearC2Bar := bar_index
 
 if sellRaid
-    bullC1 := swingHigh
     bullC2 := low
     bullC2Bar := bar_index
 else if sweptSell and low < bullC2
@@ -300,27 +296,29 @@ f_drawSetup(bool bull) =>
     else
         false
 
-// Standard-deviation projection of the C1->C2 leg + C2 / BB labels.
-// levelPrice(m) = C1 + m*(C2 - C1)  =>  m=1 at C2, m=0 at C1, negatives = targets.
+// Standard-deviation projection anchored to the Unicorn zone + C2 / BB labels.
+// 0 = the zone edge (entry/origin), 1 = C2 (manipulation extreme).
+// levelPrice(m) = zone0 + m*(C2 - zone0)  =>  m=1 at C2, m=0 at zone, negatives = targets.
 f_drawProjection(bool bull) =>
-    c1 = bull ? bullC1 : bearC1
+    [valid, zTop, zBot, bTop, bBot, fTop, fBot] = f_makeUnicorn(bull)
     c2 = bull ? bullC2 : bearC2
     c2bar = bull ? bullC2Bar : bearC2Bar
-    if showDev and not na(c1) and not na(c2) and c1 != c2
-        unit = c2 - c1
+    zone0 = bull ? zBot : zTop     // zone edge nearest C2 = the 0 / entry anchor
+    if showDev and valid and not na(c2) and not na(zone0) and c2 != zone0
+        unit = c2 - zone0
         lx = bar_index + extendBars
-        // C2 (manipulation extreme) and BB (breaker block / origin) labels
+        // C2 (manipulation extreme) and BB (breaker block at the zone) labels
         f_regLabel(label.new(c2bar, c2, "C2", style = label.style_none, textcolor = c2Col, size = size.small))
-        f_regLabel(label.new(c2bar, c1, "BB", style = label.style_none, textcolor = c2Col, size = size.small))
+        f_regLabel(label.new(c2bar, zone0, "BB", style = label.style_none, textcolor = c2Col, size = size.small))
         // Target zone band (drawn behind the ticks)
         if showTgtZone
-            pa = c1 + tgtZoneFrom * unit
-            pb = c1 + tgtZoneTo * unit
+            pa = zone0 + tgtZoneFrom * unit
+            pb = zone0 + tgtZoneTo * unit
             f_regBox(box.new(lx - devTickLen * 4, math.max(pa, pb), lx, math.min(pa, pb), border_color = na, bgcolor = tgtZoneCol))
         // Std-dev tick ladder
         for i = 0 to array.size(devArr) - 1
             m = array.get(devArr, i)
-            price = c1 + m * unit
+            price = zone0 + m * unit
             col = m < 0 ? devTargetCol : devNeutralCol
             f_regLine(line.new(lx - devTickLen, price, lx, price, color = col, width = 1))
             if showDevLabels
