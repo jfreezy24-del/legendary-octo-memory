@@ -42,6 +42,22 @@ high/low for that timeframe, so they act as standing liquidity pools to target.
 takes it out, then flips to **dashed** in the raided color (high and low tracked
 independently). The state resets when a new period prints a fresh level.
 
+### Standard-deviation targets (fractal projection)
+
+On a valid setup the indicator projects standard-deviation multiples of the **C1→C2
+manipulation leg** (the swing that swept liquidity): `1` = C2 (the manipulation extreme),
+`0` = C1 (origin), and negatives (`-1`, `-2`, `-2.5`, …) are the **draw-on-liquidity
+targets**. Levels are drawn as a tick ladder at the right edge with `C2` / `BB` labels, and
+an optional shaded **target zone** between two chosen multiples. Edit the set under
+**Standard Deviation Targets → Levels** (comma-separated, e.g. `1, 0, -1, -2, -2.5`).
+
+### Fractal HTF candle panel
+
+Set an **HTF Timeframe** (e.g. `60` for 1H while charting 5m). The last *N* completed HTF
+candles are drawn as a mini candle panel to the right of price — the "5m – 1H" fractal view
+from the reference — with hour labels and a **model info label** (`5 – 60 Model` + Bias).
+Configure under **Fractal Pair (HTF candle panel)**.
+
 ### How the logic works
 
 1. **Liquidity** — swing pivots (`Swing Pivot Length`) mark engineered liquidity; a

@@ -1,22 +1,24 @@
 //@version=5
 // =============================================================================
-//  ICT UNICORN MODEL  —  High Probability Entry Framework
+//  UNICORN MODEL  —  Fractal (HTF/LTF) + Standard-Deviation Projections
 // -----------------------------------------------------------------------------
-//  The Unicorn forms when a Breaker Block overlaps with a Fair Value Gap (FVG).
-//  This confluence creates a precision entry zone AFTER liquidity is taken and
-//  market structure shifts.
+//  The Unicorn forms when a Breaker Block overlaps with a Fair Value Gap (FVG)
+//  AFTER liquidity is taken and market structure shifts. This build pairs that
+//  entry model with the fractal std-dev projection workflow:
 //
-//      Liquidity  ->  MSS  ->  Breaker + FVG overlap  ->  Retrace  ->  Expansion
+//      Liquidity -> MSS -> Breaker + FVG overlap -> Retrace -> Expansion
 //
-//  Visuals reproduce the reference chart:
-//      • Green shaded "Unicorn zone" (Breaker x FVG overlap)
-//      • MSS (Market Structure Shift) line + label
-//      • Breaker block box + label
-//      • Overlapped FVG box + label
-//      • PDH / PDL liquidity lines (red)
+//  Drawn elements:
+//      • Green "Unicorn zone" (Breaker x FVG overlap) + Breaker level lines
+//      • Overlapped FVG box, MSS line, C2 / BB labels
+//      • Standard-deviation target ladder off the C1->C2 manipulation leg
+//        (1 = C2 extreme, 0 = C1 origin, negatives = draw-on-liquidity targets)
+//      • Target-zone highlight
+//      • Fractal HTF candle panel (e.g. 1H candles beside a 5m chart) + bias
+//      • Toggleable previous Day/Week/Month/4H/1H liquidity lines (swept-aware)
 // =============================================================================
 
-indicator("ICT Unicorn Model", "Unicorn", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+indicator("Unicorn Model — Fractal StdDev", "Unicorn", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
 
 // ============================== INPUTS =======================================
 grpS = "Structure / Narrative"
@@ -31,17 +33,23 @@ raidMemBars= input.int(50, "Raid Memory (bars)", minval = 1, group = grpS, toolt
 
 grpU = "Unicorn Zone"
 showUni    = input.bool(true, "Show Unicorn Zone",        group = grpU)
-uniColor   = input.color(color.new(#26a65b, 72), "Unicorn Zone",  group = grpU)
-uniBorder  = input.color(color.new(#26a65b, 40), "Zone Border",   group = grpU)
+uniColor   = input.color(color.new(#a5d6b7, 55), "Unicorn Zone Fill", group = grpU)
+uniBorder  = input.color(color.new(#a5d6b7, 30), "Zone Border",   group = grpU)
 extendBars = input.int(25, "Extend Zone (bars)", minval = 1, group = grpU)
 
 grpC = "Components"
-showBreaker = input.bool(true, "Show Breaker Block", group = grpC)
-breakerCol  = input.color(color.new(color.gray, 0),   "Breaker Outline", group = grpC)
+showBreaker = input.bool(true, "Show Breaker Levels", group = grpC)
+breakerCol  = input.color(color.new(color.black, 0),  "Breaker / Level Lines", group = grpC)
 showFvg     = input.bool(true, "Show Overlapped FVG", group = grpC)
-fvgCol      = input.color(color.new(#26a65b, 80), "FVG Fill",        group = grpC)
+fvgCol      = input.color(color.new(#7fc99b, 65), "FVG Fill",        group = grpC)
 showMss     = input.bool(true, "Show MSS Line",       group = grpC)
 mssCol      = input.color(color.new(color.black, 0),  "MSS Line",     group = grpC)
+txtColor    = input.color(color.new(color.black, 0),  "Label Text",   group = grpC)
+
+grpCol = "Candle Coloring (photo style)"
+colorCandles = input.bool(true, "Recolor Candles", group = grpCol, tooltip = "Paint candles green (up) / black (down) like the reference image.")
+upCol = input.color(#26a65b, "Up Candle",   group = grpCol)
+dnCol = input.color(#1c1c1c, "Down Candle", group = grpCol)
 
 grpL = "Liquidity — Previous Candle High / Low"
 liqColor    = input.color(color.new(color.red, 0),  "Line Color (unswept)", group = grpL)
@@ -61,12 +69,38 @@ useMaxLB   = input.bool(false, "Limit Max Lookback", group = grpD, tooltip = "Wh
 maxLBbars  = input.int(2000, "Max Lookback (bars)", minval = 50, group = grpD)
 maxSetups  = input.int(3, "Historical Setups on Chart", minval = 1, maxval = 50, group = grpD, tooltip = "How many of the most recent Unicorn setups to keep drawn. Older ones are removed.")
 
+grpDev = "Standard Deviation Targets"
+showDev       = input.bool(true, "Show Std-Dev Projection", group = grpDev, tooltip = "Project standard-deviation multiples of the C1->C2 manipulation leg as targets.")
+devLevels     = input.string("1, 0, -1, -2, -2.5", "Levels (C1→C2 multiples)", group = grpDev, tooltip = "Comma-separated multiples. 1 = C2 (manipulation extreme), 0 = C1 (origin), negatives = downside/upside draw-on-liquidity targets.")
+devNeutralCol = input.color(color.new(color.gray, 0), "Level 0..1 Color", group = grpDev)
+devTargetCol  = input.color(color.new(#e08a3c, 0),    "Target (negative) Color", group = grpDev)
+devTickLen    = input.int(4, "Tick Length (bars)", minval = 1, group = grpDev)
+showDevLabels = input.bool(true, "Show Level Labels", group = grpDev)
+showTgtZone   = input.bool(true, "Highlight Target Zone", group = grpDev)
+tgtZoneFrom   = input.float(-2.0, "Target Zone From (mult)", step = 0.1, group = grpDev)
+tgtZoneTo     = input.float(-2.5, "Target Zone To (mult)",   step = 0.1, group = grpDev)
+tgtZoneCol    = input.color(color.new(#e07ab5, 80), "Target Zone Fill", group = grpDev)
+c2Col         = input.color(color.new(#e08a3c, 0),  "C2 / BB Label Color", group = grpDev)
+
+grpF = "Fractal Pair (HTF candle panel)"
+htfTf      = input.timeframe("60", "HTF Timeframe", group = grpF, tooltip = "Higher timeframe for the fractal candle panel + bias. Example: HTF 1H while charting the 5m LTF.")
+showPanel  = input.bool(true, "Show HTF Candle Panel", group = grpF)
+panelCount = input.int(8, "HTF Candles", minval = 1, maxval = 30, group = grpF)
+panelGap   = input.int(12, "Gap From Price (bars)", minval = 1, group = grpF)
+panelSpace = input.int(5, "Candle Spacing (bars)", minval = 2, group = grpF)
+panelUpCol = input.color(#26a65b, "Panel Up Candle",   group = grpF)
+panelDnCol = input.color(#1c1c1c, "Panel Down Candle", group = grpF)
+showInfo   = input.bool(true, "Show Model Info Label", group = grpF)
+
 grpA = "Alerts"
 _alerts    = input.bool(true, "Enable Unicorn Alerts",   group = grpA)
 _liqAlerts = input.bool(true, "Enable Liquidity Sweep Alerts", group = grpA, tooltip = "Fire when price takes out an enabled Previous Candle High / Low.")
 
 // ============================== HELPERS ======================================
 atr = ta.atr(14)
+
+// Photo-style candle coloring (green up / black down).
+barcolor(colorCandles ? (close >= open ? upCol : dnCol) : na)
 
 // Previous completed candle high/low per timeframe (used for both drawing and
 // for the liquidity-raid narrative).
@@ -115,6 +149,41 @@ if buyRaid
     buyRaidBar := bar_index
 sweptSell = not na(sellRaidBar) and (bar_index - sellRaidBar) <= raidMemBars
 sweptBuy  = not na(buyRaidBar)  and (bar_index - buyRaidBar)  <= raidMemBars
+
+// ---- C1->C2 manipulation leg (anchors for the std-dev projection) ----
+// Bearish leg opens on a buy-side raid: C1 = origin low, C2 = manipulation high.
+// Bullish leg opens on a sell-side raid: C1 = origin high, C2 = manipulation low.
+var float bearC1 = na
+var float bearC2 = na
+var int   bearC2Bar = na
+var float bullC1 = na
+var float bullC2 = na
+var int   bullC2Bar = na
+
+if buyRaid
+    bearC1 := swingLow
+    bearC2 := high
+    bearC2Bar := bar_index
+else if sweptBuy and high > bearC2
+    bearC2 := high
+    bearC2Bar := bar_index
+
+if sellRaid
+    bullC1 := swingHigh
+    bullC2 := low
+    bullC2Bar := bar_index
+else if sweptSell and low < bullC2
+    bullC2 := low
+    bullC2Bar := bar_index
+
+// Parse the std-dev level list once.
+var array<float> devArr = array.new<float>()
+if barstate.isfirst
+    parts = str.split(devLevels, ",")
+    for i = 0 to array.size(parts) - 1
+        v = str.tonumber(str.replace_all(array.get(parts, i), " ", ""))
+        if not na(v)
+            array.push(devArr, v)
 
 // Displacement candle (strong, intent-driven move)
 bodyUp   = close > open and (close - open) > atr * dispMult
@@ -213,21 +282,49 @@ f_makeUnicorn(bool bull) =>
 f_drawSetup(bool bull) =>
     [valid, zTop, zBot, bTop, bBot, fTop, fBot] = f_makeUnicorn(bull)
     if valid
+        leftX  = bar_index - 4
         rightX = bar_index + extendBars
-        // ---- Breaker block ----
-        if showBreaker
-            f_regBox(box.new(bar_index - 3, bTop, rightX, bBot, border_color = breakerCol, border_width = 1, bgcolor = color.new(color.gray, 92)))
-            f_regLabel(label.new(bar_index - 3, bull ? bBot : bTop, "Breaker", style = label.style_label_up, color = color.new(color.gray, 100), textcolor = color.black, size = size.small))
-        // ---- Overlapped FVG ----
-        if showFvg
-            f_regBox(box.new(bar_index - 2, fTop, rightX, fBot, border_color = na, bgcolor = fvgCol))
-            f_regLabel(label.new(rightX, fBot, "Overlapped FVG", style = label.style_label_left, color = color.new(color.white, 100), textcolor = color.black, size = size.small))
-        // ---- Unicorn zone (the overlap) ----
+        // ---- Unicorn zone: the light-green overlap box (drawn first, behind) ----
         if showUni
-            f_regBox(box.new(bar_index - 3, zTop, rightX, zBot, border_color = uniBorder, border_width = 1, bgcolor = uniColor))
+            f_regBox(box.new(leftX, zTop, rightX, zBot, border_color = uniBorder, border_width = 1, bgcolor = uniColor))
+        // ---- Overlapped FVG: subtle green fill inside the zone ----
+        if showFvg
+            f_regBox(box.new(leftX, fTop, rightX, fBot, border_color = na, bgcolor = fvgCol))
+            f_regLabel(label.new(rightX, bull ? fBot : fTop, "Overlaped FVG", style = label.style_none, textcolor = txtColor, size = size.small))
+        // ---- Breaker: black level lines through the zone (the lines in the photo) ----
+        if showBreaker
+            f_regLine(line.new(leftX, bTop, rightX, bTop, color = breakerCol, width = 1))
+            f_regLine(line.new(leftX, bBot, rightX, bBot, color = breakerCol, width = 1))
+            f_regLabel(label.new(leftX, bull ? bTop : bBot, "Breaker", style = label.style_none, textcolor = txtColor, size = size.small))
         true
     else
         false
+
+// Standard-deviation projection of the C1->C2 leg + C2 / BB labels.
+// levelPrice(m) = C1 + m*(C2 - C1)  =>  m=1 at C2, m=0 at C1, negatives = targets.
+f_drawProjection(bool bull) =>
+    c1 = bull ? bullC1 : bearC1
+    c2 = bull ? bullC2 : bearC2
+    c2bar = bull ? bullC2Bar : bearC2Bar
+    if showDev and not na(c1) and not na(c2) and c1 != c2
+        unit = c2 - c1
+        lx = bar_index + extendBars
+        // C2 (manipulation extreme) and BB (breaker block / origin) labels
+        f_regLabel(label.new(c2bar, c2, "C2", style = label.style_none, textcolor = c2Col, size = size.small))
+        f_regLabel(label.new(c2bar, c1, "BB", style = label.style_none, textcolor = c2Col, size = size.small))
+        // Target zone band (drawn behind the ticks)
+        if showTgtZone
+            pa = c1 + tgtZoneFrom * unit
+            pb = c1 + tgtZoneTo * unit
+            f_regBox(box.new(lx - devTickLen * 4, math.max(pa, pb), lx, math.min(pa, pb), border_color = na, bgcolor = tgtZoneCol))
+        // Std-dev tick ladder
+        for i = 0 to array.size(devArr) - 1
+            m = array.get(devArr, i)
+            price = c1 + m * unit
+            col = m < 0 ? devTargetCol : devNeutralCol
+            f_regLine(line.new(lx - devTickLen, price, lx, price, color = col, width = 1))
+            if showDevLabels
+                f_regLabel(label.new(lx, price, str.tostring(m), style = label.style_none, textcolor = col, size = size.small))
 
 // ============================== TRIGGER LOGIC ===============================
 // Optional max-lookback gate keeps detection/drawing within the last N bars.
@@ -235,13 +332,17 @@ inLookback = not useMaxLB or (bar_index > last_bar_index - maxLBbars)
 bullValid = mssBull and (not needSweep or sweptSell) and inLookback
 bearValid = mssBear and (not needSweep or sweptBuy)  and inLookback
 
+var int lastDir = 0   // 1 = last setup bullish, -1 = bearish, 0 = none (bias)
+
 if bullValid
     setupSeq += 1
     drawn = f_drawSetup(true)
     if drawn
         if showMss
             f_regLine(line.new(swingHighBar, swingHigh, bar_index, swingHigh, color = mssCol, style = line.style_dashed, width = 1))
-            f_regLabel(label.new(bar_index, swingHigh, "MSS", style = label.style_label_down, color = color.new(color.white, 100), textcolor = color.black, size = size.small))
+            f_regLabel(label.new(swingHighBar, swingHigh, "MSS", style = label.style_none, textcolor = txtColor, size = size.small))
+        f_drawProjection(true)
+        lastDir := 1
         sellRaidBar := na    // consume the narrative
         f_prune()
     else
@@ -253,7 +354,9 @@ if bearValid
     if drawn
         if showMss
             f_regLine(line.new(swingLowBar, swingLow, bar_index, swingLow, color = mssCol, style = line.style_dashed, width = 1))
-            f_regLabel(label.new(bar_index, swingLow, "MSS", style = label.style_label_up, color = color.new(color.white, 100), textcolor = color.black, size = size.small))
+            f_regLabel(label.new(swingLowBar, swingLow, "MSS", style = label.style_none, textcolor = txtColor, size = size.small))
+        f_drawProjection(false)
+        lastDir := -1
         buyRaidBar := na
         f_prune()
     else
@@ -365,6 +468,66 @@ if barstate.islast
     oLo  := e2
     oLbH := e3
     oLbL := e4
+
+// ============= FRACTAL HTF CANDLE PANEL + MODEL INFO LABEL ==================
+// Collect completed HTF candles into rolling arrays, then draw them as a mini
+// candle panel to the right of price (the "5m – 1H" fractal view in the image).
+[hO, hH, hL, hC, hT] = request.security(syminfo.tickerid, htfTf, [open, high, low, close, time], lookahead = barmerge.lookahead_off)
+
+var array<float> paO = array.new<float>()
+var array<float> paH = array.new<float>()
+var array<float> paL = array.new<float>()
+var array<float> paC = array.new<float>()
+var array<int>   paT = array.new<int>()
+
+htfRoll = hT != hT[1]
+if htfRoll and not na(hO[1])
+    array.push(paO, hO[1])
+    array.push(paH, hH[1])
+    array.push(paL, hL[1])
+    array.push(paC, hC[1])
+    array.push(paT, hT[1])
+    while array.size(paO) > panelCount
+        array.shift(paO)
+        array.shift(paH)
+        array.shift(paL)
+        array.shift(paC)
+        array.shift(paT)
+
+var array<box>   panBoxes  = array.new<box>()
+var array<line>  panWicks  = array.new<line>()
+var array<label> panLabels = array.new<label>()
+var label infoLbl = na
+
+if barstate.islast
+    // Clear previous panel
+    for b in panBoxes
+        box.delete(b)
+    array.clear(panBoxes)
+    for l in panWicks
+        line.delete(l)
+    array.clear(panWicks)
+    for la in panLabels
+        label.delete(la)
+    array.clear(panLabels)
+    if showPanel
+        halfW = math.max(1, int(panelSpace / 2))
+        for i = 0 to array.size(paO) - 1
+            cx = bar_index + panelGap + i * panelSpace
+            o = array.get(paO, i)
+            c = array.get(paC, i)
+            h = array.get(paH, i)
+            l = array.get(paL, i)
+            t = array.get(paT, i)
+            col = c >= o ? panelUpCol : panelDnCol
+            array.push(panWicks, line.new(cx, h, cx, l, color = col, width = 1))
+            array.push(panBoxes, box.new(cx - halfW, math.max(o, c), cx + halfW, math.min(o, c), border_color = col, bgcolor = col))
+            array.push(panLabels, label.new(cx, l, str.format_time(t, "HH:mm", syminfo.timezone), style = label.style_none, textcolor = txtColor, size = size.tiny))
+    // Model info label
+    label.delete(infoLbl)
+    if showInfo
+        biasTxt = lastDir == 1 ? "Bullish" : lastDir == -1 ? "Bearish" : "Neutral"
+        infoLbl := label.new(bar_index, low, timeframe.period + " – " + htfTf + " Model\nBias: " + biasTxt, style = label.style_none, yloc = yloc.belowbar, textcolor = txtColor, size = size.normal)
 
 // ============================== ALERTS ======================================
 // --- Unicorn model alerts ---
