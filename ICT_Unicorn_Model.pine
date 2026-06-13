@@ -1,0 +1,197 @@
+//@version=5
+// =============================================================================
+//  ICT UNICORN MODEL  —  High Probability Entry Framework
+// -----------------------------------------------------------------------------
+//  The Unicorn forms when a Breaker Block overlaps with a Fair Value Gap (FVG).
+//  This confluence creates a precision entry zone AFTER liquidity is taken and
+//  market structure shifts.
+//
+//      Liquidity  ->  MSS  ->  Breaker + FVG overlap  ->  Retrace  ->  Expansion
+//
+//  Visuals reproduce the reference chart:
+//      • Green shaded "Unicorn zone" (Breaker x FVG overlap)
+//      • MSS (Market Structure Shift) line + label
+//      • Breaker block box + label
+//      • Overlapped FVG box + label
+//      • PDH / PDL liquidity lines (red)
+// =============================================================================
+
+indicator("ICT Unicorn Model", "Unicorn", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// ============================== INPUTS =======================================
+grpS = "Structure / Narrative"
+swingLen   = input.int(5,   "Swing Pivot Length",        minval = 2, group = grpS, tooltip = "Bars on each side used to confirm a swing high / low (liquidity).")
+dispMult   = input.float(1.5,"Displacement Strength (ATR)",minval = 0, step = 0.1, group = grpS, tooltip = "Minimum body size (in ATR) for the MSS candle to count as displacement.")
+needSweep  = input.bool(true,"Require Liquidity Sweep",  group = grpS, tooltip = "Only validate a Unicorn when liquidity was swept before the MSS (No narrative = No model).")
+
+grpU = "Unicorn Zone"
+showUni    = input.bool(true, "Show Unicorn Zone",        group = grpU)
+uniColor   = input.color(color.new(#26a65b, 72), "Unicorn Zone",  group = grpU)
+uniBorder  = input.color(color.new(#26a65b, 40), "Zone Border",   group = grpU)
+extendBars = input.int(25, "Extend Zone (bars)", minval = 1, group = grpU)
+
+grpC = "Components"
+showBreaker = input.bool(true, "Show Breaker Block", group = grpC)
+breakerCol  = input.color(color.new(color.gray, 0),   "Breaker Outline", group = grpC)
+showFvg     = input.bool(true, "Show Overlapped FVG", group = grpC)
+fvgCol      = input.color(color.new(#26a65b, 80), "FVG Fill",        group = grpC)
+showMss     = input.bool(true, "Show MSS Line",       group = grpC)
+mssCol      = input.color(color.new(color.black, 0),  "MSS Line",     group = grpC)
+
+grpL = "Liquidity (PDH / PDL)"
+showLiq    = input.bool(true, "Show PDH / PDL", group = grpL)
+liqColor   = input.color(color.new(color.red, 0), "PDH / PDL Lines", group = grpL)
+
+grpA = "Alerts"
+_alerts    = input.bool(true, "Enable Unicorn Alerts", group = grpA)
+
+// ============================== HELPERS ======================================
+atr = ta.atr(14)
+
+// Swing pivots = engineered liquidity (PDH / PDL / equal highs-lows analog)
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low,  swingLen, swingLen)
+
+var float swingHigh    = na   // active swing high to break for a bullish MSS
+var float swingLow     = na   // active swing low to break for a bearish MSS
+var int   swingHighBar = na
+var int   swingLowBar  = na
+
+if not na(ph)
+    swingHigh    := ph
+    swingHighBar := bar_index - swingLen
+if not na(pl)
+    swingLow    := pl
+    swingLowBar := bar_index - swingLen
+
+// Liquidity sweep flags: wick beyond a swing then close back inside (raid)
+var bool sweptSell = false   // raided sell-side (below swing low)  -> bullish setup
+var bool sweptBuy  = false   // raided buy-side  (above swing high) -> bearish setup
+
+if not na(swingLow) and low < swingLow and close > swingLow
+    sweptSell := true
+if not na(swingHigh) and high > swingHigh and close < swingHigh
+    sweptBuy := true
+
+// Displacement candle (strong, intent-driven move)
+bodyUp   = close > open and (close - open) > atr * dispMult
+bodyDown = open > close and (open - close) > atr * dispMult
+
+// ============================== MSS DETECTION ================================
+// Bullish MSS: close breaks above the active swing high with displacement
+mssBull = showMss and not na(swingHigh) and close > swingHigh and close[1] <= swingHigh and bodyUp
+// Bearish MSS: close breaks below the active swing low with displacement
+mssBear = showMss and not na(swingLow)  and close < swingLow  and close[1] >= swingLow  and bodyDown
+
+// ============================== BREAKER + FVG OVERLAP =======================
+// Most recent opposing candle before the displacement leg -> breaker block.
+// Bullish breaker = last down-close candle; Bearish breaker = last up-close candle.
+f_breaker(bool bull) =>
+    float bTop = na
+    float bBot = na
+    for i = 1 to 10
+        bearC = close[i] < open[i]
+        bullC = close[i] > open[i]
+        if bull and bearC
+            bTop := math.max(open[i], high[i])
+            bBot := math.min(close[i], low[i])
+            break
+        if not bull and bullC
+            bTop := math.max(close[i], high[i])
+            bBot := math.min(open[i], low[i])
+            break
+    [bTop, bBot]
+
+// FVG measured on the displacement (3-candle imbalance around current bar)
+fvgBullTop = low          // gap upper edge
+fvgBullBot = high[2]      // gap lower edge
+fvgBearTop = low[2]
+fvgBearBot = high
+isFvgBull  = low > high[2]
+isFvgBear  = high < low[2]
+
+var box  uniBox  = na
+var box  fvgBox  = na
+var box  brkBox  = na
+var line mssLine = na
+var label mssLbl = na
+var label brkLbl = na
+var label fvgLbl = na
+
+f_makeUnicorn(bool bull) =>
+    [bTop, bBot] = f_breaker(bull)
+    fTop = bull ? fvgBullTop : fvgBearTop
+    fBot = bull ? fvgBullBot : fvgBearBot
+    okFvg = bull ? isFvgBull : isFvgBear
+    // Overlap of breaker range and FVG range = the Unicorn zone
+    zTop = math.min(bTop, fTop)
+    zBot = math.max(bBot, fBot)
+    valid = not na(bTop) and okFvg and zTop > zBot
+    [valid, zTop, zBot, bTop, bBot, fTop, fBot]
+
+f_drawSetup(bool bull) =>
+    [valid, zTop, zBot, bTop, bBot, fTop, fBot] = f_makeUnicorn(bull)
+    if valid
+        rightX = bar_index + extendBars
+        // ---- Breaker block ----
+        if showBreaker
+            brkBox := box.new(bar_index - 3, bTop, rightX, bBot, border_color = breakerCol, border_width = 1, bgcolor = color.new(color.gray, 92))
+            brkLbl := label.new(bar_index - 3, bull ? bBot : bTop, "Breaker", style = label.style_label_up, color = color.new(color.gray, 100), textcolor = color.black, size = size.small)
+        // ---- Overlapped FVG ----
+        if showFvg
+            fvgBox := box.new(bar_index - 2, fTop, rightX, fBot, border_color = na, bgcolor = fvgCol)
+            fvgLbl := label.new(rightX, fBot, "Overlapped FVG", style = label.style_label_left, color = color.new(color.white, 100), textcolor = color.black, size = size.small)
+        // ---- Unicorn zone (the overlap) ----
+        if showUni
+            uniBox := box.new(bar_index - 3, zTop, rightX, zBot, border_color = uniBorder, border_width = 1, bgcolor = uniColor)
+        true
+    else
+        false
+
+// ============================== TRIGGER LOGIC ===============================
+bullValid = mssBull and (not needSweep or sweptSell)
+bearValid = mssBear and (not needSweep or sweptBuy)
+
+if bullValid
+    drawn = f_drawSetup(true)
+    if drawn
+        if showMss
+            mssLine := line.new(swingHighBar, swingHigh, bar_index, swingHigh, color = mssCol, style = line.style_dashed, width = 1)
+            mssLbl  := label.new(bar_index, swingHigh, "MSS", style = label.style_label_down, color = color.new(color.white, 100), textcolor = color.black, size = size.small)
+        sweptSell := false   // consume the narrative
+
+if bearValid
+    drawn = f_drawSetup(false)
+    if drawn
+        if showMss
+            mssLine := line.new(swingLowBar, swingLow, bar_index, swingLow, color = mssCol, style = line.style_dashed, width = 1)
+            mssLbl  := label.new(bar_index, swingLow, "MSS", style = label.style_label_up, color = color.new(color.white, 100), textcolor = color.black, size = size.small)
+        sweptBuy := false
+
+// ============================== LIQUIDITY (PDH / PDL) =======================
+pdh = request.security(syminfo.tickerid, "D", high[1], lookahead = barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "D", low[1],  lookahead = barmerge.lookahead_on)
+
+var line pdhLine = na
+var line pdlLine = na
+var label pdhLbl = na
+var label pdlLbl = na
+
+if showLiq and barstate.islast
+    line.delete(pdhLine)
+    line.delete(pdlLine)
+    label.delete(pdhLbl)
+    label.delete(pdlLbl)
+    leftX = bar_index - 60
+    pdhLine := line.new(leftX, pdh, bar_index + extendBars, pdh, color = liqColor, width = 1)
+    pdlLine := line.new(leftX, pdl, bar_index + extendBars, pdl, color = liqColor, width = 1)
+    pdhLbl  := label.new(bar_index + extendBars, pdh, "PDH", style = label.style_label_left, color = color.new(color.white, 100), textcolor = liqColor, size = size.small)
+    pdlLbl  := label.new(bar_index + extendBars, pdl, "PDL", style = label.style_label_left, color = color.new(color.white, 100), textcolor = liqColor, size = size.small)
+
+// ============================== ALERTS ======================================
+alertcondition(bullValid, "Bullish Unicorn", "Bullish ICT Unicorn formed (Breaker + FVG overlap after bullish MSS).")
+alertcondition(bearValid, "Bearish Unicorn", "Bearish ICT Unicorn formed (Breaker + FVG overlap after bearish MSS).")
+if _alerts and bullValid
+    alert("Bullish ICT Unicorn — enter on retrace into the overlap. Stop below the Unicorn range.", alert.freq_once_per_bar_close)
+if _alerts and bearValid
+    alert("Bearish ICT Unicorn — enter on retrace into the overlap. Stop above the Unicorn range.", alert.freq_once_per_bar_close)
