@@ -44,8 +44,9 @@ showMss     = input.bool(true, "Show MSS Line",       group = grpC)
 mssCol      = input.color(color.new(color.black, 0),  "MSS Line",     group = grpC)
 
 grpL = "Liquidity — Previous Candle High / Low"
-liqColor    = input.color(color.new(color.red, 0), "Line Color",  group = grpL)
-liqStyleIn  = input.string("Solid", "Line Style", options = ["Solid", "Dashed", "Dotted"], group = grpL)
+liqColor    = input.color(color.new(color.red, 0),  "Line Color (unswept)", group = grpL)
+raidedColor = input.color(color.new(color.gray, 30),"Line Color (raided)",  group = grpL, tooltip = "Color a level switches to once price has taken it out. Raided levels also become dashed.")
+liqStyleIn  = input.string("Solid", "Line Style (unswept)", options = ["Solid", "Dashed", "Dotted"], group = grpL)
 liqWidth    = input.int(1, "Line Width", minval = 1, maxval = 4, group = grpL)
 liqLabels   = input.bool(true, "Show Labels", group = grpL)
 // Per-timeframe toggles
@@ -263,9 +264,30 @@ if bearValid
 // Levels (dH/dL ... oH/oL) are computed once up in HELPERS and reused here.
 liqStyle = liqStyleIn == "Dashed" ? line.style_dashed : liqStyleIn == "Dotted" ? line.style_dotted : line.style_solid
 
-// Draw (or refresh) a high/low pair on the last bar. Returns the handle set so
+// Per-timeframe raid state: a side stays "raided" until a new period resets the
+// level. Returns [hiRaided, loRaided]. One var-set per call site, so each
+// timeframe gets independent memory.
+f_lvlRaided(float lvlHi, float lvlLo) =>
+    var float pHi = na
+    var float pLo = na
+    var bool  hiR = false
+    var bool  loR = false
+    if lvlHi != pHi
+        pHi := lvlHi
+        hiR := false
+    if lvlLo != pLo
+        pLo := lvlLo
+        loR := false
+    if not na(lvlHi) and high > lvlHi
+        hiR := true
+    if not na(lvlLo) and low < lvlLo
+        loR := true
+    [hiR, loR]
+
+// Draw (or refresh) a high/low pair on the last bar. Solid + unswept color
+// before the raid; dashed + raided color once taken. Returns the handle set so
 // each timeframe keeps its own persistent lines/labels across bars.
-f_drawLevel(bool show, float hi, float lo, string tagHi, string tagLo, line lnHi, line lnLo, label lbHi, label lbLo) =>
+f_drawLevel(bool show, float hi, float lo, string tagHi, string tagLo, bool hiRaided, bool loRaided, line lnHi, line lnLo, label lbHi, label lbLo) =>
     line.delete(lnHi)
     line.delete(lnLo)
     label.delete(lbHi)
@@ -277,12 +299,23 @@ f_drawLevel(bool show, float hi, float lo, string tagHi, string tagLo, line lnHi
     if show and not na(hi)
         leftX  = bar_index - 60
         rightX = bar_index + extendBars
-        rHi := line.new(leftX, hi, rightX, hi, color = liqColor, style = liqStyle, width = liqWidth)
-        rLo := line.new(leftX, lo, rightX, lo, color = liqColor, style = liqStyle, width = liqWidth)
+        hiCol = hiRaided ? raidedColor : liqColor
+        loCol = loRaided ? raidedColor : liqColor
+        hiSty = hiRaided ? line.style_dashed : liqStyle
+        loSty = loRaided ? line.style_dashed : liqStyle
+        rHi := line.new(leftX, hi, rightX, hi, color = hiCol, style = hiSty, width = liqWidth)
+        rLo := line.new(leftX, lo, rightX, lo, color = loCol, style = loSty, width = liqWidth)
         if liqLabels
-            aHi := label.new(rightX, hi, tagHi, style = label.style_label_left, color = color.new(color.white, 100), textcolor = liqColor, size = size.small)
-            aLo := label.new(rightX, lo, tagLo, style = label.style_label_left, color = color.new(color.white, 100), textcolor = liqColor, size = size.small)
+            aHi := label.new(rightX, hi, tagHi, style = label.style_label_left, color = color.new(color.white, 100), textcolor = hiCol, size = size.small)
+            aLo := label.new(rightX, lo, tagLo, style = label.style_label_left, color = color.new(color.white, 100), textcolor = loCol, size = size.small)
     [rHi, rLo, aHi, aLo]
+
+// Evaluate raid state every bar (must be outside the islast block).
+[dHiR, dLoR] = f_lvlRaided(dH, dL)
+[wHiR, wLoR] = f_lvlRaided(wH, wL)
+[mHiR, mLoR] = f_lvlRaided(mH, mL)
+[fHiR, fLoR] = f_lvlRaided(fH, fL)
+[oHiR, oLoR] = f_lvlRaided(oH, oL)
 
 // One persistent handle-set per timeframe.
 var line dHi = na
@@ -307,27 +340,27 @@ var label oLbH = na
 var label oLbL = na
 
 if barstate.islast
-    [a1, a2, a3, a4] = f_drawLevel(showPDH, dH, dL, "PDH", "PDL", dHi, dLo, dLbH, dLbL)
+    [a1, a2, a3, a4] = f_drawLevel(showPDH, dH, dL, "PDH", "PDL", dHiR, dLoR, dHi, dLo, dLbH, dLbL)
     dHi  := a1
     dLo  := a2
     dLbH := a3
     dLbL := a4
-    [b1, b2, b3, b4] = f_drawLevel(showPWH, wH, wL, "PWH", "PWL", wHi, wLo, wLbH, wLbL)
+    [b1, b2, b3, b4] = f_drawLevel(showPWH, wH, wL, "PWH", "PWL", wHiR, wLoR, wHi, wLo, wLbH, wLbL)
     wHi  := b1
     wLo  := b2
     wLbH := b3
     wLbL := b4
-    [c1, c2, c3, c4] = f_drawLevel(showPMH, mH, mL, "PMH", "PML", mHi, mLo, mLbH, mLbL)
+    [c1, c2, c3, c4] = f_drawLevel(showPMH, mH, mL, "PMH", "PML", mHiR, mLoR, mHi, mLo, mLbH, mLbL)
     mHi  := c1
     mLo  := c2
     mLbH := c3
     mLbL := c4
-    [d1, d2, d3, d4] = f_drawLevel(showPHH, fH, fL, "P4H", "P4L", fHi, fLo, fLbH, fLbL)
+    [d1, d2, d3, d4] = f_drawLevel(showPHH, fH, fL, "P4H", "P4L", fHiR, fLoR, fHi, fLo, fLbH, fLbL)
     fHi  := d1
     fLo  := d2
     fLbH := d3
     fLbL := d4
-    [e1, e2, e3, e4] = f_drawLevel(showP1H, oH, oL, "P1H", "P1L", oHi, oLo, oLbH, oLbL)
+    [e1, e2, e3, e4] = f_drawLevel(showP1H, oH, oL, "P1H", "P1L", oHiR, oLoR, oHi, oLo, oLbH, oLbL)
     oHi  := e1
     oLo  := e2
     oLbH := e3

@@ -34,9 +34,13 @@ Each timeframe has its own on/off switch under **Liquidity — Previous Candle H
 | Previous 4H | `P4H` / `P4L` |
 | Previous 1H | `P1H` / `P1L` |
 
-Shared controls: line color, style (Solid / Dashed / Dotted), width, and label visibility.
-Each level pulls the **previous completed candle's** high/low for that timeframe, so they
-act as standing liquidity pools to target.
+Shared controls: unswept line color, **raided line color**, base style (Solid / Dashed /
+Dotted), width, and label visibility. Each level pulls the **previous completed candle's**
+high/low for that timeframe, so they act as standing liquidity pools to target.
+
+**Swept state:** each side of a level is drawn **solid** in the unswept color until price
+takes it out, then flips to **dashed** in the raided color (high and low tracked
+independently). The state resets when a new period prints a fresh level.
 
 ### How the logic works
 
