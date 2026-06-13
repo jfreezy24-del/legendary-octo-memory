@@ -50,8 +50,14 @@ showPMH = input.bool(false, "Previous Month High/Low (PMH/PML)",  group = grpL)
 showPHH = input.bool(false, "Previous 4H High/Low (P4H/P4L)",     group = grpL)
 showP1H = input.bool(false, "Previous 1H High/Low (P1H/P1L)",     group = grpL)
 
+grpD = "Display / History"
+useMaxLB   = input.bool(false, "Limit Max Lookback", group = grpD, tooltip = "When on, the indicator only detects/draws within the last N bars (keeps the chart light on long histories).")
+maxLBbars  = input.int(2000, "Max Lookback (bars)", minval = 50, group = grpD)
+maxSetups  = input.int(3, "Historical Setups on Chart", minval = 1, maxval = 50, group = grpD, tooltip = "How many of the most recent Unicorn setups to keep drawn. Older ones are removed.")
+
 grpA = "Alerts"
-_alerts    = input.bool(true, "Enable Unicorn Alerts", group = grpA)
+_alerts    = input.bool(true, "Enable Unicorn Alerts",   group = grpA)
+_liqAlerts = input.bool(true, "Enable Liquidity Sweep Alerts", group = grpA, tooltip = "Fire when price takes out an enabled Previous Candle High / Low.")
 
 // ============================== HELPERS ======================================
 atr = ta.atr(14)
@@ -118,13 +124,51 @@ fvgBearBot = high
 isFvgBull  = low > high[2]
 isFvgBear  = high < low[2]
 
-var box  uniBox  = na
-var box  fvgBox  = na
-var box  brkBox  = na
-var line mssLine = na
-var label mssLbl = na
-var label brkLbl = na
-var label fvgLbl = na
+// ---- Historical setup registry: keep only the last `maxSetups` on chart ----
+var array<box>   setBoxes  = array.new<box>()
+var array<line>  setLines  = array.new<line>()
+var array<label> setLabels = array.new<label>()
+var array<int>   boxSeq    = array.new<int>()
+var array<int>   lineSeq   = array.new<int>()
+var array<int>   labelSeq  = array.new<int>()
+var int setupSeq = 0
+
+f_regBox(box b) =>
+    array.push(setBoxes, b)
+    array.push(boxSeq, setupSeq)
+f_regLine(line l) =>
+    array.push(setLines, l)
+    array.push(lineSeq, setupSeq)
+f_regLabel(label la) =>
+    array.push(setLabels, la)
+    array.push(labelSeq, setupSeq)
+
+f_prune() =>
+    minKeep = setupSeq - maxSetups + 1
+    i = 0
+    while i < array.size(setBoxes)
+        if array.get(boxSeq, i) < minKeep
+            box.delete(array.get(setBoxes, i))
+            array.remove(setBoxes, i)
+            array.remove(boxSeq, i)
+        else
+            i += 1
+    j = 0
+    while j < array.size(setLines)
+        if array.get(lineSeq, j) < minKeep
+            line.delete(array.get(setLines, j))
+            array.remove(setLines, j)
+            array.remove(lineSeq, j)
+        else
+            j += 1
+    k = 0
+    while k < array.size(setLabels)
+        if array.get(labelSeq, k) < minKeep
+            label.delete(array.get(setLabels, k))
+            array.remove(setLabels, k)
+            array.remove(labelSeq, k)
+        else
+            k += 1
 
 f_makeUnicorn(bool bull) =>
     [bTop, bBot] = f_breaker(bull)
@@ -143,38 +187,48 @@ f_drawSetup(bool bull) =>
         rightX = bar_index + extendBars
         // ---- Breaker block ----
         if showBreaker
-            brkBox := box.new(bar_index - 3, bTop, rightX, bBot, border_color = breakerCol, border_width = 1, bgcolor = color.new(color.gray, 92))
-            brkLbl := label.new(bar_index - 3, bull ? bBot : bTop, "Breaker", style = label.style_label_up, color = color.new(color.gray, 100), textcolor = color.black, size = size.small)
+            f_regBox(box.new(bar_index - 3, bTop, rightX, bBot, border_color = breakerCol, border_width = 1, bgcolor = color.new(color.gray, 92)))
+            f_regLabel(label.new(bar_index - 3, bull ? bBot : bTop, "Breaker", style = label.style_label_up, color = color.new(color.gray, 100), textcolor = color.black, size = size.small))
         // ---- Overlapped FVG ----
         if showFvg
-            fvgBox := box.new(bar_index - 2, fTop, rightX, fBot, border_color = na, bgcolor = fvgCol)
-            fvgLbl := label.new(rightX, fBot, "Overlapped FVG", style = label.style_label_left, color = color.new(color.white, 100), textcolor = color.black, size = size.small)
+            f_regBox(box.new(bar_index - 2, fTop, rightX, fBot, border_color = na, bgcolor = fvgCol))
+            f_regLabel(label.new(rightX, fBot, "Overlapped FVG", style = label.style_label_left, color = color.new(color.white, 100), textcolor = color.black, size = size.small))
         // ---- Unicorn zone (the overlap) ----
         if showUni
-            uniBox := box.new(bar_index - 3, zTop, rightX, zBot, border_color = uniBorder, border_width = 1, bgcolor = uniColor)
+            f_regBox(box.new(bar_index - 3, zTop, rightX, zBot, border_color = uniBorder, border_width = 1, bgcolor = uniColor))
         true
     else
         false
 
 // ============================== TRIGGER LOGIC ===============================
-bullValid = mssBull and (not needSweep or sweptSell)
-bearValid = mssBear and (not needSweep or sweptBuy)
+// Optional max-lookback gate keeps detection/drawing within the last N bars.
+inLookback = not useMaxLB or (bar_index > last_bar_index - maxLBbars)
+bullValid = mssBull and (not needSweep or sweptSell) and inLookback
+bearValid = mssBear and (not needSweep or sweptBuy)  and inLookback
 
 if bullValid
+    setupSeq += 1
     drawn = f_drawSetup(true)
     if drawn
         if showMss
-            mssLine := line.new(swingHighBar, swingHigh, bar_index, swingHigh, color = mssCol, style = line.style_dashed, width = 1)
-            mssLbl  := label.new(bar_index, swingHigh, "MSS", style = label.style_label_down, color = color.new(color.white, 100), textcolor = color.black, size = size.small)
+            f_regLine(line.new(swingHighBar, swingHigh, bar_index, swingHigh, color = mssCol, style = line.style_dashed, width = 1))
+            f_regLabel(label.new(bar_index, swingHigh, "MSS", style = label.style_label_down, color = color.new(color.white, 100), textcolor = color.black, size = size.small))
         sweptSell := false   // consume the narrative
+        f_prune()
+    else
+        setupSeq -= 1        // nothing drawn, release the sequence number
 
 if bearValid
+    setupSeq += 1
     drawn = f_drawSetup(false)
     if drawn
         if showMss
-            mssLine := line.new(swingLowBar, swingLow, bar_index, swingLow, color = mssCol, style = line.style_dashed, width = 1)
-            mssLbl  := label.new(bar_index, swingLow, "MSS", style = label.style_label_up, color = color.new(color.white, 100), textcolor = color.black, size = size.small)
+            f_regLine(line.new(swingLowBar, swingLow, bar_index, swingLow, color = mssCol, style = line.style_dashed, width = 1))
+            f_regLabel(label.new(bar_index, swingLow, "MSS", style = label.style_label_up, color = color.new(color.white, 100), textcolor = color.black, size = size.small))
         sweptBuy := false
+        f_prune()
+    else
+        setupSeq -= 1
 
 // ============= LIQUIDITY — Toggleable Previous Candle High / Low ============
 // Previous-candle high/low for any timeframe = liquidity pools to draw on.
@@ -258,9 +312,42 @@ if barstate.islast
     oLbL := e4
 
 // ============================== ALERTS ======================================
+// --- Unicorn model alerts ---
 alertcondition(bullValid, "Bullish Unicorn", "Bullish ICT Unicorn formed (Breaker + FVG overlap after bullish MSS).")
 alertcondition(bearValid, "Bearish Unicorn", "Bearish ICT Unicorn formed (Breaker + FVG overlap after bearish MSS).")
 if _alerts and bullValid
     alert("Bullish ICT Unicorn — enter on retrace into the overlap. Stop below the Unicorn range.", alert.freq_once_per_bar_close)
 if _alerts and bearValid
     alert("Bearish ICT Unicorn — enter on retrace into the overlap. Stop above the Unicorn range.", alert.freq_once_per_bar_close)
+
+// --- Liquidity sweep alerts (only for enabled timeframes) ---
+f_sweptHi(bool show, float lvl) => show and not na(lvl) and high > lvl and high[1] <= lvl
+f_sweptLo(bool show, float lvl) => show and not na(lvl) and low  < lvl and low[1]  >= lvl
+
+sweepPDH = f_sweptHi(showPDH, dH)
+sweepPDL = f_sweptLo(showPDH, dL)
+sweepPWH = f_sweptHi(showPWH, wH)
+sweepPWL = f_sweptLo(showPWH, wL)
+sweepPMH = f_sweptHi(showPMH, mH)
+sweepPML = f_sweptLo(showPMH, mL)
+sweepP4H = f_sweptHi(showPHH, fH)
+sweepP4L = f_sweptLo(showPHH, fL)
+sweepP1H = f_sweptHi(showP1H, oH)
+sweepP1L = f_sweptLo(showP1H, oL)
+
+anyHiSweep = sweepPDH or sweepPWH or sweepPMH or sweepP4H or sweepP1H
+anyLoSweep = sweepPDL or sweepPWL or sweepPML or sweepP4L or sweepP1L
+
+alertcondition(sweepPDH, "PDH Swept", "Previous Day High liquidity taken.")
+alertcondition(sweepPDL, "PDL Swept", "Previous Day Low liquidity taken.")
+alertcondition(sweepPWH, "PWH Swept", "Previous Week High liquidity taken.")
+alertcondition(sweepPWL, "PWL Swept", "Previous Week Low liquidity taken.")
+alertcondition(sweepPMH, "PMH Swept", "Previous Month High liquidity taken.")
+alertcondition(sweepPML, "PML Swept", "Previous Month Low liquidity taken.")
+alertcondition(anyHiSweep, "Any High Swept", "Buy-side liquidity taken (enabled previous-candle high).")
+alertcondition(anyLoSweep, "Any Low Swept",  "Sell-side liquidity taken (enabled previous-candle low).")
+
+if _liqAlerts and anyHiSweep
+    alert("Buy-side liquidity swept — a previous-candle high was taken out.", alert.freq_once_per_bar_close)
+if _liqAlerts and anyLoSweep
+    alert("Sell-side liquidity swept — a previous-candle low was taken out.", alert.freq_once_per_bar_close)

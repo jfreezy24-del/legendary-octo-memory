@@ -57,4 +57,22 @@ act as standing liquidity pools to target.
 3. **Add to chart**. Tune inputs (swing length, displacement, colors) under the gear icon.
 4. Optional: create alerts from the **Bullish / Bearish Unicorn** conditions.
 
+### Display / History
+
+- **Limit Max Lookback** — when on, detection and drawing only happen within the last
+  *N* bars (`Max Lookback (bars)`), keeping the chart light on long histories.
+- **Historical Setups on Chart** — how many of the most recent Unicorn setups to keep
+  drawn (1–50). Older setups (their zone, breaker, FVG, MSS line and labels) are removed
+  automatically as new ones print.
+
+### Alerts
+
+- **Unicorn:** `Bullish Unicorn`, `Bearish Unicorn` — fire when a valid setup forms.
+- **Liquidity sweeps:** `PDH/PDL`, `PWH/PWL`, `PMH/PML`, plus `Any High Swept` /
+  `Any Low Swept` — fire when price takes out an **enabled** previous-candle high/low.
+
+Create alerts from these conditions (Add Alert → Condition → *ICT Unicorn Model*), or use
+the built-in `alert()` pushes toggled by **Enable Unicorn Alerts** /
+**Enable Liquidity Sweep Alerts**.
+
 > Educational tool for discretionary ICT-style analysis — not financial advice.
