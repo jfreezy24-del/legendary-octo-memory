@@ -47,7 +47,11 @@ act as standing liquidity pools to target.
 3. **Breaker + FVG overlap** — the last opposing candle becomes the breaker block;
    the 3-candle imbalance is the FVG. Their intersection is drawn as the **Unicorn zone**.
 4. **Narrative gate** — with `Require Liquidity Sweep` on, no sweep = no model
-   (*No narrative = No model*).
+   (*No narrative = No model*). Choose which pools count as the raid under
+   **Structure / Narrative**: swing highs/lows and/or previous **Day / Week / Month**
+   high/low. A sweep stays valid as narrative for `Raid Memory (bars)` while the
+   model waits for the MSS — e.g. price raids the **previous week low**, then a
+   bullish MSS within that window validates the Unicorn.
 5. **Targets** — draw on opposing-side liquidity (PDH / PDL lines) for the expansion leg.
 
 ### Install

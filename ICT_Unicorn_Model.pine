@@ -23,6 +23,11 @@ grpS = "Structure / Narrative"
 swingLen   = input.int(5,   "Swing Pivot Length",        minval = 2, group = grpS, tooltip = "Bars on each side used to confirm a swing high / low (liquidity).")
 dispMult   = input.float(1.5,"Displacement Strength (ATR)",minval = 0, step = 0.1, group = grpS, tooltip = "Minimum body size (in ATR) for the MSS candle to count as displacement.")
 needSweep  = input.bool(true,"Require Liquidity Sweep",  group = grpS, tooltip = "Only validate a Unicorn when liquidity was swept before the MSS (No narrative = No model).")
+raidSwing  = input.bool(true, "Raid: Swing Highs/Lows",  group = grpS, tooltip = "Count a sweep of an intraday swing pivot as the liquidity raid.")
+raidDay    = input.bool(false,"Raid: Previous Day H/L",  group = grpS, tooltip = "Count a sweep of the previous DAY high/low as the liquidity raid.")
+raidWeek   = input.bool(true, "Raid: Previous Week H/L", group = grpS, tooltip = "Count a sweep of the previous WEEK high/low as the liquidity raid.")
+raidMonth  = input.bool(true, "Raid: Previous Month H/L",group = grpS, tooltip = "Count a sweep of the previous MONTH high/low as the liquidity raid.")
+raidMemBars= input.int(50, "Raid Memory (bars)", minval = 1, group = grpS, tooltip = "How long a sweep stays 'valid' as narrative while waiting for the MSS.")
 
 grpU = "Unicorn Zone"
 showUni    = input.bool(true, "Show Unicorn Zone",        group = grpU)
@@ -62,6 +67,14 @@ _liqAlerts = input.bool(true, "Enable Liquidity Sweep Alerts", group = grpA, too
 // ============================== HELPERS ======================================
 atr = ta.atr(14)
 
+// Previous completed candle high/low per timeframe (used for both drawing and
+// for the liquidity-raid narrative).
+[dH, dL] = request.security(syminfo.tickerid, "D",   [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[wH, wL] = request.security(syminfo.tickerid, "W",   [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[mH, mL] = request.security(syminfo.tickerid, "M",   [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[fH, fL] = request.security(syminfo.tickerid, "240", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[oH, oL] = request.security(syminfo.tickerid, "60",  [high[1], low[1]], lookahead = barmerge.lookahead_on)
+
 // Swing pivots = engineered liquidity (PDH / PDL / equal highs-lows analog)
 ph = ta.pivothigh(high, swingLen, swingLen)
 pl = ta.pivotlow(low,  swingLen, swingLen)
@@ -78,14 +91,29 @@ if not na(pl)
     swingLow    := pl
     swingLowBar := bar_index - swingLen
 
-// Liquidity sweep flags: wick beyond a swing then close back inside (raid)
-var bool sweptSell = false   // raided sell-side (below swing low)  -> bullish setup
-var bool sweptBuy  = false   // raided buy-side  (above swing high) -> bearish setup
+// Liquidity raid = price takes out a pool (swing pivot and/or a chosen HTF
+// previous-candle high/low). A sell-side raid (low taken) sets up a bullish
+// Unicorn; a buy-side raid (high taken) sets up a bearish Unicorn.
+f_tookLo(float lvl) => not na(lvl) and low  < lvl and low[1]  >= lvl
+f_tookHi(float lvl) => not na(lvl) and high > lvl and high[1] <= lvl
 
-if not na(swingLow) and low < swingLow and close > swingLow
-    sweptSell := true
-if not na(swingHigh) and high > swingHigh and close < swingHigh
-    sweptBuy := true
+// Swing-pivot raid (wick beyond swing then close back inside)
+swingRaidSell = raidSwing and not na(swingLow)  and low  < swingLow  and close > swingLow
+swingRaidBuy  = raidSwing and not na(swingHigh) and high > swingHigh and close < swingHigh
+
+// HTF previous-candle raids
+sellRaid = swingRaidSell or (raidDay and f_tookLo(dL)) or (raidWeek and f_tookLo(wL)) or (raidMonth and f_tookLo(mL))
+buyRaid  = swingRaidBuy  or (raidDay and f_tookHi(dH)) or (raidWeek and f_tookHi(wH)) or (raidMonth and f_tookHi(mH))
+
+// Remember the most recent raid; it stays valid as narrative for raidMemBars.
+var int sellRaidBar = na
+var int buyRaidBar  = na
+if sellRaid
+    sellRaidBar := bar_index
+if buyRaid
+    buyRaidBar := bar_index
+sweptSell = not na(sellRaidBar) and (bar_index - sellRaidBar) <= raidMemBars
+sweptBuy  = not na(buyRaidBar)  and (bar_index - buyRaidBar)  <= raidMemBars
 
 // Displacement candle (strong, intent-driven move)
 bodyUp   = close > open and (close - open) > atr * dispMult
@@ -213,7 +241,7 @@ if bullValid
         if showMss
             f_regLine(line.new(swingHighBar, swingHigh, bar_index, swingHigh, color = mssCol, style = line.style_dashed, width = 1))
             f_regLabel(label.new(bar_index, swingHigh, "MSS", style = label.style_label_down, color = color.new(color.white, 100), textcolor = color.black, size = size.small))
-        sweptSell := false   // consume the narrative
+        sellRaidBar := na    // consume the narrative
         f_prune()
     else
         setupSeq -= 1        // nothing drawn, release the sequence number
@@ -225,21 +253,15 @@ if bearValid
         if showMss
             f_regLine(line.new(swingLowBar, swingLow, bar_index, swingLow, color = mssCol, style = line.style_dashed, width = 1))
             f_regLabel(label.new(bar_index, swingLow, "MSS", style = label.style_label_up, color = color.new(color.white, 100), textcolor = color.black, size = size.small))
-        sweptBuy := false
+        buyRaidBar := na
         f_prune()
     else
         setupSeq -= 1
 
 // ============= LIQUIDITY — Toggleable Previous Candle High / Low ============
 // Previous-candle high/low for any timeframe = liquidity pools to draw on.
+// Levels (dH/dL ... oH/oL) are computed once up in HELPERS and reused here.
 liqStyle = liqStyleIn == "Dashed" ? line.style_dashed : liqStyleIn == "Dotted" ? line.style_dotted : line.style_solid
-
-// Pull the previous completed candle's high/low for each higher timeframe.
-[dH, dL] = request.security(syminfo.tickerid, "D",   [high[1], low[1]], lookahead = barmerge.lookahead_on)
-[wH, wL] = request.security(syminfo.tickerid, "W",   [high[1], low[1]], lookahead = barmerge.lookahead_on)
-[mH, mL] = request.security(syminfo.tickerid, "M",   [high[1], low[1]], lookahead = barmerge.lookahead_on)
-[fH, fL] = request.security(syminfo.tickerid, "240", [high[1], low[1]], lookahead = barmerge.lookahead_on)
-[oH, oL] = request.security(syminfo.tickerid, "60",  [high[1], low[1]], lookahead = barmerge.lookahead_on)
 
 // Draw (or refresh) a high/low pair on the last bar. Returns the handle set so
 // each timeframe keeps its own persistent lines/labels across bars.
