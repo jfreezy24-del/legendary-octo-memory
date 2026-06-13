@@ -20,7 +20,23 @@ File: [`ICT_Unicorn_Model.pine`](ICT_Unicorn_Model.pine)
 | **MSS** | Dashed line + `MSS` label where structure shifts with displacement |
 | **Breaker** | Outlined box + `Breaker` label on the breaker block |
 | **Overlapped FVG** | Green-filled box + `Overlapped FVG` label |
-| **PDH / PDL** | Red horizontal liquidity lines (previous day high / low) |
+| **Liquidity lines** | Toggleable red previous-candle high/low lines per timeframe |
+
+### Liquidity — Previous Candle High / Low (toggleable)
+
+Each timeframe has its own on/off switch under **Liquidity — Previous Candle High / Low**:
+
+| Toggle | Draws |
+| --- | --- |
+| Previous Day | `PDH` / `PDL` |
+| Previous Week | `PWH` / `PWL` |
+| Previous Month | `PMH` / `PML` |
+| Previous 4H | `P4H` / `P4L` |
+| Previous 1H | `P1H` / `P1L` |
+
+Shared controls: line color, style (Solid / Dashed / Dotted), width, and label visibility.
+Each level pulls the **previous completed candle's** high/low for that timeframe, so they
+act as standing liquidity pools to target.
 
 ### How the logic works
 

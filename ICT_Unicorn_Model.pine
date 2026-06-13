@@ -38,9 +38,17 @@ fvgCol      = input.color(color.new(#26a65b, 80), "FVG Fill",        group = grp
 showMss     = input.bool(true, "Show MSS Line",       group = grpC)
 mssCol      = input.color(color.new(color.black, 0),  "MSS Line",     group = grpC)
 
-grpL = "Liquidity (PDH / PDL)"
-showLiq    = input.bool(true, "Show PDH / PDL", group = grpL)
-liqColor   = input.color(color.new(color.red, 0), "PDH / PDL Lines", group = grpL)
+grpL = "Liquidity — Previous Candle High / Low"
+liqColor    = input.color(color.new(color.red, 0), "Line Color",  group = grpL)
+liqStyleIn  = input.string("Solid", "Line Style", options = ["Solid", "Dashed", "Dotted"], group = grpL)
+liqWidth    = input.int(1, "Line Width", minval = 1, maxval = 4, group = grpL)
+liqLabels   = input.bool(true, "Show Labels", group = grpL)
+// Per-timeframe toggles
+showPDH = input.bool(true,  "Previous Day High/Low (PDH/PDL)",    group = grpL)
+showPWH = input.bool(false, "Previous Week High/Low (PWH/PWL)",   group = grpL)
+showPMH = input.bool(false, "Previous Month High/Low (PMH/PML)",  group = grpL)
+showPHH = input.bool(false, "Previous 4H High/Low (P4H/P4L)",     group = grpL)
+showP1H = input.bool(false, "Previous 1H High/Low (P1H/P1L)",     group = grpL)
 
 grpA = "Alerts"
 _alerts    = input.bool(true, "Enable Unicorn Alerts", group = grpA)
@@ -168,25 +176,86 @@ if bearValid
             mssLbl  := label.new(bar_index, swingLow, "MSS", style = label.style_label_up, color = color.new(color.white, 100), textcolor = color.black, size = size.small)
         sweptBuy := false
 
-// ============================== LIQUIDITY (PDH / PDL) =======================
-pdh = request.security(syminfo.tickerid, "D", high[1], lookahead = barmerge.lookahead_on)
-pdl = request.security(syminfo.tickerid, "D", low[1],  lookahead = barmerge.lookahead_on)
+// ============= LIQUIDITY — Toggleable Previous Candle High / Low ============
+// Previous-candle high/low for any timeframe = liquidity pools to draw on.
+liqStyle = liqStyleIn == "Dashed" ? line.style_dashed : liqStyleIn == "Dotted" ? line.style_dotted : line.style_solid
 
-var line pdhLine = na
-var line pdlLine = na
-var label pdhLbl = na
-var label pdlLbl = na
+// Pull the previous completed candle's high/low for each higher timeframe.
+[dH, dL] = request.security(syminfo.tickerid, "D",   [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[wH, wL] = request.security(syminfo.tickerid, "W",   [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[mH, mL] = request.security(syminfo.tickerid, "M",   [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[fH, fL] = request.security(syminfo.tickerid, "240", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[oH, oL] = request.security(syminfo.tickerid, "60",  [high[1], low[1]], lookahead = barmerge.lookahead_on)
 
-if showLiq and barstate.islast
-    line.delete(pdhLine)
-    line.delete(pdlLine)
-    label.delete(pdhLbl)
-    label.delete(pdlLbl)
-    leftX = bar_index - 60
-    pdhLine := line.new(leftX, pdh, bar_index + extendBars, pdh, color = liqColor, width = 1)
-    pdlLine := line.new(leftX, pdl, bar_index + extendBars, pdl, color = liqColor, width = 1)
-    pdhLbl  := label.new(bar_index + extendBars, pdh, "PDH", style = label.style_label_left, color = color.new(color.white, 100), textcolor = liqColor, size = size.small)
-    pdlLbl  := label.new(bar_index + extendBars, pdl, "PDL", style = label.style_label_left, color = color.new(color.white, 100), textcolor = liqColor, size = size.small)
+// Draw (or refresh) a high/low pair on the last bar. Returns the handle set so
+// each timeframe keeps its own persistent lines/labels across bars.
+f_drawLevel(bool show, float hi, float lo, string tagHi, string tagLo, line lnHi, line lnLo, label lbHi, label lbLo) =>
+    line.delete(lnHi)
+    line.delete(lnLo)
+    label.delete(lbHi)
+    label.delete(lbLo)
+    line  rHi = na
+    line  rLo = na
+    label aHi = na
+    label aLo = na
+    if show and not na(hi)
+        leftX  = bar_index - 60
+        rightX = bar_index + extendBars
+        rHi := line.new(leftX, hi, rightX, hi, color = liqColor, style = liqStyle, width = liqWidth)
+        rLo := line.new(leftX, lo, rightX, lo, color = liqColor, style = liqStyle, width = liqWidth)
+        if liqLabels
+            aHi := label.new(rightX, hi, tagHi, style = label.style_label_left, color = color.new(color.white, 100), textcolor = liqColor, size = size.small)
+            aLo := label.new(rightX, lo, tagLo, style = label.style_label_left, color = color.new(color.white, 100), textcolor = liqColor, size = size.small)
+    [rHi, rLo, aHi, aLo]
+
+// One persistent handle-set per timeframe.
+var line dHi = na
+var line dLo = na
+var label dLbH = na
+var label dLbL = na
+var line wHi = na
+var line wLo = na
+var label wLbH = na
+var label wLbL = na
+var line mHi = na
+var line mLo = na
+var label mLbH = na
+var label mLbL = na
+var line fHi = na
+var line fLo = na
+var label fLbH = na
+var label fLbL = na
+var line oHi = na
+var line oLo = na
+var label oLbH = na
+var label oLbL = na
+
+if barstate.islast
+    [a1, a2, a3, a4] = f_drawLevel(showPDH, dH, dL, "PDH", "PDL", dHi, dLo, dLbH, dLbL)
+    dHi  := a1
+    dLo  := a2
+    dLbH := a3
+    dLbL := a4
+    [b1, b2, b3, b4] = f_drawLevel(showPWH, wH, wL, "PWH", "PWL", wHi, wLo, wLbH, wLbL)
+    wHi  := b1
+    wLo  := b2
+    wLbH := b3
+    wLbL := b4
+    [c1, c2, c3, c4] = f_drawLevel(showPMH, mH, mL, "PMH", "PML", mHi, mLo, mLbH, mLbL)
+    mHi  := c1
+    mLo  := c2
+    mLbH := c3
+    mLbL := c4
+    [d1, d2, d3, d4] = f_drawLevel(showPHH, fH, fL, "P4H", "P4L", fHi, fLo, fLbH, fLbL)
+    fHi  := d1
+    fLo  := d2
+    fLbH := d3
+    fLbL := d4
+    [e1, e2, e3, e4] = f_drawLevel(showP1H, oH, oL, "P1H", "P1L", oHi, oLo, oLbH, oLbL)
+    oHi  := e1
+    oLo  := e2
+    oLbH := e3
+    oLbL := e4
 
 // ============================== ALERTS ======================================
 alertcondition(bullValid, "Bullish Unicorn", "Bullish ICT Unicorn formed (Breaker + FVG overlap after bullish MSS).")
